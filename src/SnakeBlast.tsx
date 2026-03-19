@@ -311,7 +311,7 @@ const rndPowerup=(tier: number):string=>{
   return pool[(Math.random()*pool.length)|0];
 };
 
-const SPEEDS: Record<string, number> = { Slow: 230, Normal: 140, Fast: 72 };
+const SPEEDS: Record<string, number> = { Slow: 200, Normal: 140, Fast: 88, Insane: 48 };
 
 // ── Shop prices (0 = free/default) ────────────────────────────────────────────
 const SKIN_PRICES:         Record<string,number> = {Mono:0,   Neon:120,  Arctic:280, Magma:520,  Cosmic:840 };
@@ -335,9 +335,9 @@ const VOID_THEMES: Record<string,VoidThemeDef> = {
 const VOIDTHEME_PRICES: Record<string,number> = {Nebula:0, Aurora:280, Solar:560, Pulsar:900};
 const DIFF_COIN_MULT:      Record<string,number> = {Easy:0.7, Normal:1.0, Hard:1.8  };
 const SKIN_COIN_MULT:      Record<string,number> = {Mono:1.0, Neon:1.1, Arctic:1.2, Magma:1.35, Cosmic:1.5};
-const SPEED_SCORE_MULT:    Record<string,number> = {Slow:0.8, Normal:1.0, Fast:1.4  };
+const SPEED_SCORE_MULT:    Record<string,number> = {Slow:0.8, Normal:1.0, Fast:1.4, Insane:2.0};
 const SIZE_SCORE_MULT:     Record<string,number> = {Small:1.0,Medium:1.2, Large:1.5 };
-const SPEED_COIN_MULT:     Record<string,number> = {Slow:0.6, Normal:1.0, Fast:1.6  };
+const SPEED_COIN_MULT:     Record<string,number> = {Slow:0.6, Normal:1.0, Fast:1.6, Insane:2.4};
 
 const SKINS: Record<string, SkinDef> = {
   Mono:   { head:"#ffffff", a:"#eeeeee", b:"#ff3333", glow:"#ff5555" },
@@ -1537,7 +1537,7 @@ export default function SnakeBlast(): JSX.Element {
 
     const drawMenuSnake=(W: number,H: number,ts: number):void=>{
       const skin=SKINS[stRef.current.skin]||SKINS.Mono;
-      const sm=stRef.current.speed==="Fast"?2.0:stRef.current.speed==="Slow"?0.45:1;
+      const sm=stRef.current.speed==="Insane"?3.2:stRef.current.speed==="Fast"?2.0:stRef.current.speed==="Slow"?0.45:1;
       const N=42,SP=65;
       const pos=(t: number)=>{const tt=t*0.00048*sm;const d=1+Math.sin(tt)*Math.sin(tt);return{x:W/2+W*0.40*Math.cos(tt)/d,y:H/2+H*0.24*Math.sin(tt)*Math.cos(tt)/d};};
       const pts=Array.from({length:N},(_,i)=>pos(ts-i*SP));
@@ -1625,7 +1625,7 @@ export default function SnakeBlast(): JSX.Element {
     };
 
     const drawStars=(W: number,H: number,ts: number):void=>{
-      const sm=stRef.current.speed==="Fast"?2.2:stRef.current.speed==="Slow"?0.45:1;
+      const sm=stRef.current.speed==="Insane"?3.5:stRef.current.speed==="Fast"?2.2:stRef.current.speed==="Slow"?0.45:1;
       // Batch stars into 6 opacity tiers — cuts state changes from 90→6
       ctx.save();
       for(let tier=0;tier<6;tier++){
