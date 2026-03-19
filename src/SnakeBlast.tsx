@@ -48,6 +48,7 @@ interface Shape {
   bonus: number;
   id: number;
   col?: string;
+  tileSet?: Set<string>;
 }
 
 interface ShapeDef {
@@ -245,9 +246,9 @@ const MAZE_DIFF_DEFS: Record<string,{pass:number,dep:number}> = {
   Hard:   {pass:4, dep:2},
 };
 const FOREST_DIFF_DEFS: Record<string,{density:number,cluster:number,clearR:number,ringW:number,ringDensity:number}> = {
-  Easy:   {density:0.003, cluster:8, clearR:10, ringW:14, ringDensity:0.003},
-  Normal: {density:0.007, cluster:6, clearR:8,  ringW:16, ringDensity:0.009},
-  Hard:   {density:0.015, cluster:5, clearR:5,  ringW:18, ringDensity:0.020},
+  Easy:   {density:0.055, cluster:6, clearR:10, ringW:14, ringDensity:0.055},
+  Normal: {density:0.085, cluster:5, clearR:8,  ringW:16, ringDensity:0.090},
+  Hard:   {density:0.120, cluster:4, clearR:5,  ringW:18, ringDensity:0.130},
 };
 const mazeDims=(sizeKey:string,diffKey:string)=>{
   const s=MAZE_SIZE_DEFS[sizeKey]||MAZE_SIZE_DEFS.Small;
@@ -282,10 +283,10 @@ const rndFruitType=(tier: number=0):number=>{
 // ── Powerups ──────────────────────────────────────────────────────────────────
 interface PowerupDef {id:string;icon:string;col:string;glow:string;dur:number;score:number;}
 const POWERUP_DEFS: PowerupDef[]=[
-  {id:"rush",  icon:"⚡",col:"#ffee44",glow:"#ffcc00",dur:5000,score:30 },
-  {id:"chill", icon:"❄", col:"#88ddff",glow:"#44aaff",dur:6000,score:30 },
-  {id:"ghost", icon:"✦", col:"#bbbbff",glow:"#6666ff",dur:7000,score:50 },
-  {id:"double",icon:"★", col:"#ffdd00",glow:"#ffaa00",dur:8000,score:75 },
+  {id:"rush",  icon:"!!",col:"#ffee44",glow:"#ffcc00",dur:5000,score:30 },
+  {id:"chill", icon:"~~", col:"#88ddff",glow:"#44aaff",dur:6000,score:30 },
+  {id:"ghost", icon:"++", col:"#bbbbff",glow:"#6666ff",dur:7000,score:50 },
+  {id:"double",icon:"x2", col:"#ffdd00",glow:"#ffaa00",dur:8000,score:75 },
 ];
 // Chance (0–1) of a powerup spawning every 10 s when none are on the map, per tier
 const POWERUP_SPAWN_CHANCE=[0.20,0.35,0.50,0.70,0.90];
@@ -457,34 +458,58 @@ function genMaze(mz: number, pass: number, dep: number): Uint8Array {
 
 function genForest(wt: number, density: number, cluster: number, clearR: number, ringW: number, ringDensity: number): Uint8Array {
   const tiles=new Uint8Array(wt*wt).fill(1);
-  // Solid border
   for(let x=0;x<wt;x++){tiles[x]=0;tiles[(wt-1)*wt+x]=0;}
   for(let y=0;y<wt;y++){tiles[y*wt]=0;tiles[y*wt+wt-1]=0;}
   const mid=(wt/2)|0;
-  const placeCluster=(cx: number,cy: number,sw: number,sh: number):void=>{
-    for(let dy=0;dy<sh;dy++)for(let dx=0;dx<sw;dx++){
-      const tx=cx+dx,ty=cy+dy;
-      if(tx>0&&tx<wt-1&&ty>0&&ty<wt-1)tiles[ty*wt+tx]=0;
+  const GAP=3;
+  const placed:{x:number,y:number,r:number}[]=[];
+  const tooClose=(cx:number,cy:number,r:number):boolean=>{
+    for(const p of placed){const dx=cx-p.x,dy=cy-p.y;if(Math.sqrt(dx*dx+dy*dy)<r+p.r+GAP)return true;}return false;
+  };
+  const placeOrganic=(cx:number,cy:number,r:number):void=>{
+    placed.push({x:cx,y:cy,r});
+    const ri=Math.ceil(r)+1;
+    for(let dy=-ri;dy<=ri;dy++)for(let dx=-ri;dx<=ri;dx++){
+      const dist=Math.sqrt(dx*dx+dy*dy);
+      if(dist<=r*0.65||(dist<=r*1.15&&Math.random()<0.60)){
+        const tx=cx+dx,ty=cy+dy;
+        if(tx>1&&tx<wt-2&&ty>1&&ty<wt-2)tiles[ty*wt+tx]=0;
+      }
     }
   };
-  // Global tree scatter — skip the clear zone around spawn
-  const numSeeds=(wt*wt*density)|0;
-  for(let i=0;i<numSeeds;i++){
+  // Global scatter
+  const numAttempts=(wt*wt*density*6)|0;
+  for(let i=0;i<numAttempts;i++){
     const cx=2+((Math.random()*(wt-4))|0);
     const cy=2+((Math.random()*(wt-4))|0);
     if(Math.abs(cx-mid)<clearR&&Math.abs(cy-mid)<clearR)continue;
-    placeCluster(cx,cy,1+((Math.random()*cluster)|0),1+((Math.random()*cluster)|0));
+    const r=1.4+Math.random()*cluster*0.48;
+    if(tooClose(cx,cy,r))continue;
+    placeOrganic(cx,cy,r);
   }
-  // Dense ring just outside the clear zone — closes in the spawn area
-  const ringArea=Math.PI*(ringW*ringW-clearR*clearR);
-  const ringSeeds=(ringArea*ringDensity)|0;
-  for(let i=0;i<ringSeeds;i++){
+  // Dense ring around spawn
+  const ringAttempts=((Math.PI*(ringW*ringW-clearR*clearR))*ringDensity*6)|0;
+  for(let i=0;i<ringAttempts;i++){
     const ang=Math.random()*Math.PI*2;
-    const r=clearR+Math.random()*ringW;
-    const cx=Math.max(2,Math.min(wt-3,(mid+Math.cos(ang)*r)|0));
-    const cy=Math.max(2,Math.min(wt-3,(mid+Math.sin(ang)*r)|0));
-    placeCluster(cx,cy,1+((Math.random()*cluster)|0),1+((Math.random()*cluster)|0));
+    const rr=clearR+Math.random()*ringW;
+    const cx=Math.max(2,Math.min(wt-3,(mid+Math.cos(ang)*rr)|0));
+    const cy=Math.max(2,Math.min(wt-3,(mid+Math.sin(ang)*rr)|0));
+    if(Math.abs(cx-mid)<clearR&&Math.abs(cy-mid)<clearR)continue;
+    const r=1.4+Math.random()*cluster*0.48;
+    if(tooClose(cx,cy,r))continue;
+    placeOrganic(cx,cy,r);
   }
+  // Post-process: widen 1-tile pinch corridors
+  for(let ty=2;ty<wt-2;ty++)for(let tx=2;tx<wt-2;tx++){
+    if(!tiles[ty*wt+tx])continue;
+    const blockedH=!tiles[ty*wt+tx-1]&&!tiles[ty*wt+tx+1];
+    const blockedV=!tiles[(ty-1)*wt+tx]&&!tiles[(ty+1)*wt+tx];
+    if(blockedH&&!blockedV){tiles[ty*wt+tx-1]=1;}
+    else if(blockedV&&!blockedH){tiles[(ty-1)*wt+tx]=1;}
+  }
+  // Re-enforce border
+  for(let x=0;x<wt;x++){tiles[x]=0;tiles[(wt-1)*wt+x]=0;}
+  for(let y=0;y<wt;y++){tiles[y*wt]=0;tiles[y*wt+wt-1]=0;}
   return tiles;
 }
 
@@ -547,7 +572,7 @@ const ac=():AudioContext=>{
   return _ac;
 };
 const _t=(type: OscillatorType,freq: number,t: number,dur: number,vol: number=0.12):void=>{const a=ac(),o=a.createOscillator(),g=a.createGain();o.type=type;o.frequency.value=freq;o.connect(g);g.connect(a.destination);g.gain.setValueAtTime(0,t);g.gain.linearRampToValueAtTime(vol,t+0.005);g.gain.exponentialRampToValueAtTime(0.0001,t+dur);o.start(t);o.stop(t+dur+0.01);};
-const sndClick=():void=>{const a=ac(),t=a.currentTime;_t('square',900,t,0.04,0.07);_t('square',1200,t,0.025,0.04);};
+const sndClick=():void=>{const a=ac(),t=a.currentTime;_t('sine',480,t,0.055,0.038);_t('triangle',720,t,0.032,0.020);};
 const sndTurnH=():void=>{const a=ac(),t=a.currentTime;const o=a.createOscillator(),g=a.createGain(),f=a.createBiquadFilter();o.type='sawtooth';o.frequency.setValueAtTime(200,t);o.frequency.exponentialRampToValueAtTime(380,t+0.05);f.type='lowpass';f.frequency.value=800;o.connect(f);f.connect(g);g.connect(a.destination);g.gain.setValueAtTime(0,t);g.gain.linearRampToValueAtTime(0.055,t+0.008);g.gain.exponentialRampToValueAtTime(0.0001,t+0.055);o.start(t);o.stop(t+0.06);};
 const sndTurnV=():void=>{const a=ac(),t=a.currentTime;const o=a.createOscillator(),g=a.createGain(),f=a.createBiquadFilter();o.type='sawtooth';o.frequency.setValueAtTime(100,t);o.frequency.exponentialRampToValueAtTime(190,t+0.06);f.type='lowpass';f.frequency.value=500;o.connect(f);f.connect(g);g.connect(a.destination);g.gain.setValueAtTime(0,t);g.gain.linearRampToValueAtTime(0.055,t+0.008);g.gain.exponentialRampToValueAtTime(0.0001,t+0.065);o.start(t);o.stop(t+0.07);};
 const sndEat=(type: number=0):void=>{const a=ac(),t=a.currentTime;const freqs=[[440,880],[440,660,1100],[330,550,880,1320],[220,330,440,660,1100,1760]];const step=[0.065,0.055,0.048,0.038][type]||0.065;(freqs[type]||freqs[0]).forEach((f,i)=>_t('sine',f,t+i*step,0.13,0.10+type*0.016));};
@@ -571,6 +596,8 @@ export default function SnakeBlast(): JSX.Element {
   const stRef        =useRef<GameSettings>({speed:"Normal",skin:"Mono",bg:"Mono",maze:"Normal",mapSize:"Small",map:"Practice"});
   const confettiRef  =useRef<ConfettiParticle[]>([]);
   const particlesRef =useRef<Particle[]>([]);
+  const mazeUnlockedRef  =useRef<boolean>(false);
+  const showIntroRef     =useRef<boolean>(false);
   const hsBeatenRef  =useRef<boolean>(false);
   const gameStartHSRef=useRef<number>(0);
   const newHSAnimRef  =useRef<{score:number,anim:number}|null>(null);
@@ -582,6 +609,8 @@ export default function SnakeBlast(): JSX.Element {
   const mazeJustUnlockedRef=useRef<boolean>(false);
   const unlocksRef    =useRef<UnlockStore>({skins:["Mono"],mazethemes:["Mono"],maps:["Practice"],forestthemes:[],mapsizes:["Small"],voidthemes:[]});
   const[screen,    setScreen    ]=useState<ScreenState>("menu");
+  const [showIntro,    setShowIntro]    =useState<boolean>(false);
+  useEffect(()=>{showIntroRef.current=showIntro;},[showIntro]);
   const[menuPage,  setMenuPage  ]=useState<"main"|"skins"|"maps"|"info">("main");
   const[settings,  setSettings  ]=useState<GameSettings>(()=>{
     try{
@@ -645,7 +674,7 @@ export default function SnakeBlast(): JSX.Element {
     else if(menuPage==="maps"){setViewMap(settings.map);setViewMaze(settings.maze);setViewMapSize(settings.mapSize||"Small");setViewBg(settings.bg);}
   // eslint-disable-next-line react-hooks/exhaustive-deps
   },[menuPage]);
-  useEffect(()=>{unlocksRef.current=unlocks;localStorage.setItem("snakeBlastUnlocks",JSON.stringify(unlocks));},[unlocks]);
+  useEffect(()=>{unlocksRef.current=unlocks;mazeUnlockedRef.current=unlocks.maps.includes("Maze");localStorage.setItem("snakeBlastUnlocks",JSON.stringify(unlocks));},[unlocks]);
   useEffect(()=>{
     if(menuPage!=="maps"){menuMapRef.current=null;menuMapAnimRef.current=0;return;}
     menuMapAnimRef.current=0;
@@ -730,7 +759,8 @@ export default function SnakeBlast(): JSX.Element {
     const tier=THEME_TIER[eff.bg]??0;
     const sizeIndex={Small:0,Medium:1,Large:2}[eff.mapSize||"Small"]??0;
     const diffFruitMult={Easy:0.8,Normal:1.0,Hard:1.6}[eff.maze]??1.0;
-    const fruitTarget=Math.round([10+tier*2, 22+tier*3, 34+tier*5][sizeIndex]*diffFruitMult);
+    const forestMult=eff.map==="Forest"?1.5:1.0;
+    const fruitTarget=Math.round([10+tier*2, 22+tier*3, 26+tier*3][sizeIndex]*diffFruitMult*forestMult);
     const powerupTarget=0; // kept for interface compat; actual spawning is timer-based
     const scoreMult=parseFloat(((SPEED_SCORE_MULT[eff.speed]||1)*(SIZE_SCORE_MULT[eff.mapSize||"Small"]||1)).toFixed(2));
     const baseTick=SPEEDS[eff.speed]||140;
@@ -767,6 +797,10 @@ export default function SnakeBlast(): JSX.Element {
     newHSAnimRef.current=null;
     coinsEarnedRef.current=0;
     mazeJustUnlockedRef.current=false;
+    if(!localStorage.getItem("snakeBlastIntroSeen")){
+      localStorage.setItem("snakeBlastIntroSeen","1");
+      setShowIntro(true);
+    }
     srRef.current="playing";setScreen("playing");
   },[]);
 
@@ -788,6 +822,7 @@ export default function SnakeBlast(): JSX.Element {
       if(g.waitInput)g.waitInput=false;
     };
     const onKey=(e: KeyboardEvent):void=>{
+      if(showIntroRef.current){setShowIntro(false);showIntroRef.current=false;return;}
       const nd=D[e.key];
       if(nd){e.preventDefault();applyDir(nd);}
       if((e.key===" "||e.key==="Enter")&&srRef.current==="gameover")startGame(stRef.current);
@@ -1055,77 +1090,75 @@ export default function SnakeBlast(): JSX.Element {
         for(let i=1;i<n-1;i++)ctx.quadraticCurveTo(p[i].x,p[i].y,mx(i,i+1),my(i,i+1));
         ctx.lineTo(p[n-1].x,p[n-1].y);
       };
-      const spline=():void=>{
-        ctx.beginPath();
-        for(const sp of subPaths)smooth(sp);
-      };
+      // Build the snake path ONCE — reused for all body stroke passes (eliminates 8x redundant path builds)
       ctx.save();ctx.lineCap="round";ctx.lineJoin="round";
+      ctx.beginPath();
+      for(const sp of subPaths)smooth(sp);
 
       // Ghost: pulsing blue glow and reduced base opacity
       if(ghostActive){
         const gp=0.18+0.12*Math.sin(ts*0.008);
-        spline();ctx.lineWidth=lw+30;ctx.strokeStyle="#3333ff";ctx.globalAlpha=gp;ctx.stroke();
-        spline();ctx.lineWidth=lw+14;ctx.strokeStyle="#aaaaff";ctx.globalAlpha=gp*0.5;ctx.stroke();
+        ctx.lineWidth=lw+30;ctx.strokeStyle="#3333ff";ctx.globalAlpha=gp;ctx.stroke();
+        ctx.lineWidth=lw+14;ctx.strokeStyle="#aaaaff";ctx.globalAlpha=gp*0.5;ctx.stroke();
         ctx.globalAlpha=1;
       }
 
       // Outer glow
-      spline();ctx.lineWidth=lw+18;ctx.strokeStyle=skin.glow;ctx.globalAlpha=ghostActive?0.03:0.07;ctx.stroke();
-      spline();ctx.lineWidth=lw+8;ctx.globalAlpha=ghostActive?0.07:0.15;ctx.stroke();
+      ctx.lineWidth=lw+18;ctx.strokeStyle=skin.glow;ctx.globalAlpha=ghostActive?0.02:0.03;ctx.stroke();
+      ctx.lineWidth=lw+8;ctx.globalAlpha=ghostActive?0.04:0.07;ctx.stroke();
       ctx.globalAlpha=1;
 
       // Drop shadow — makes snake look elevated above the floor
       ctx.shadowColor="rgba(0,0,0,0.6)";ctx.shadowBlur=12;
       ctx.shadowOffsetX=3;ctx.shadowOffsetY=7;
-      spline();ctx.lineWidth=lw;ctx.strokeStyle="rgba(0,0,0,0.01)";ctx.stroke();
+      ctx.lineWidth=lw;ctx.strokeStyle="rgba(0,0,0,0.01)";ctx.stroke();
       ctx.shadowColor="transparent";ctx.shadowBlur=0;ctx.shadowOffsetX=0;ctx.shadowOffsetY=0;
 
       // Dark edge ring — peeks out around the main body, gives roundness/depth
-      spline();ctx.lineWidth=lw+4;ctx.strokeStyle="rgba(0,0,0,0.50)";ctx.stroke();
+      ctx.lineWidth=lw+4;ctx.strokeStyle="rgba(0,0,0,0.50)";ctx.stroke();
 
       // Main body — gradient along length (tail colour → head colour)
-      spline();ctx.lineWidth=lw;
       const gr=ctx.createLinearGradient(pts[N-1].x,pts[N-1].y,pts[0].x,pts[0].y);
       gr.addColorStop(0,skin.a);gr.addColorStop(1,skin.b);
-      ctx.strokeStyle=gr;ctx.stroke();
+      ctx.lineWidth=lw;ctx.strokeStyle=gr;ctx.stroke();
+
+      // Cylinder highlight + specular drawn here before tabs (path still valid)
+      ctx.lineWidth=lw*0.45;ctx.strokeStyle=lerpHex(skin.a,"#ffffff",0.28);ctx.globalAlpha=0.50;ctx.stroke();
+      ctx.lineWidth=lw*0.13;ctx.strokeStyle="#ffffff";ctx.globalAlpha=0.28;ctx.stroke();
+      ctx.globalAlpha=1;
 
       // ── Body tabs — alternating chevron lightning marks from each edge ─────
+      // (tabs call beginPath per triangle, which is fine — path strokes already done above)
       {const sp=subPaths[0];
       if(sp.length>=3){
         ctx.save();
-        const thw=lw*0.23;   // half-width along body axis
-        const oY =lw*0.48;   // outer y — sits right at edge
-        const iY =lw*0.09;   // inner y — tip of chevron (inward)
+        const thw=lw*0.23;
+        const oY =lw*0.48;
+        const iY =lw*0.09;
+        // Precompute RGB for both skin colors once — avoids 4 hex-parses per tab
+        const[ar,ag,ab]=hRgb(skin.a),[br,bg2,bb]=hRgb(skin.b);
+        const Nm1=Math.max(N-1,1);
         for(let i=2;i<sp.length-1;i++){
           const dx=sp[i].x-sp[i-1].x,dy=sp[i].y-sp[i-1].y;
           const len=Math.sqrt(dx*dx+dy*dy);if(len<2)continue;
-          const tAng=Math.atan2(dy,dx);
+          const cs=dx/len,sn=dy/len;
           const mx=(sp[i-1].x+sp[i].x)*0.5,my=(sp[i-1].y+sp[i].y)*0.5;
-          // Match body gradient colour at this index, then darken
-          const tf=clamp(i/Math.max(N-1,1),0,1);
-          const tabCol=lerpHex(lerpHex(skin.b,skin.a,tf),"#000000",0.36);
-          const side=(i%2===0)?1:-1;
-          ctx.save();
-          ctx.translate(mx,my);ctx.rotate(tAng);
-          ctx.fillStyle=tabCol;ctx.globalAlpha=0.88;
+          const tf=clamp(i/Nm1,0,1);
+          // Numeric lerp: skin.b→skin.a, then darken 36% — no string parsing
+          const tr=((br+(ar-br)*tf)*0.64)|0;
+          const tg=((bg2+(ag-bg2)*tf)*0.64)|0;
+          const tb=((bb+(ab-bb)*tf)*0.64)|0;
+          const so=(i%2===0)?oY:-oY;
+          const si2=(i%2===0)?iY:-iY;
+          ctx.fillStyle=`rgb(${tr},${tg},${tb})`;ctx.globalAlpha=0.88;
           ctx.beginPath();
-          ctx.moveTo(-thw, side*oY);   // back outer corner (on edge)
-          ctx.lineTo(   0, side*iY);   // inner tip — chevron point
-          ctx.lineTo( thw, side*oY);   // front outer corner (on edge)
+          ctx.moveTo(mx-thw*cs-so*sn, my-thw*sn+so*cs);
+          ctx.lineTo(mx-si2*sn,        my+si2*cs);
+          ctx.lineTo(mx+thw*cs-so*sn, my+thw*sn+so*cs);
           ctx.closePath();ctx.fill();
-          ctx.restore();
         }
         ctx.globalAlpha=1;ctx.restore();
       }}
-
-      // Cylinder highlight — wide bright stripe, simulates light hitting the top of the tube
-      spline();ctx.lineWidth=lw*0.45;
-      ctx.strokeStyle=lerpHex(skin.a,"#ffffff",0.28);
-      ctx.globalAlpha=0.50;ctx.stroke();
-
-      // Specular gloss — thin hot-spot, adds glossy/wet look
-      spline();ctx.lineWidth=lw*0.13;
-      ctx.strokeStyle="#ffffff";ctx.globalAlpha=0.28;ctx.stroke();
 
       ctx.globalAlpha=1;
       ctx.restore();
@@ -1290,7 +1323,19 @@ export default function SnakeBlast(): JSX.Element {
     };
 
     const drawHUD=(W: number,H: number,g: GameState):void=>{
-      void H;
+      const vW=W,vH=H;
+      if(g.mapType==="Practice"&&!mazeUnlockedRef.current){
+        const prog=Math.min(1,g.score/1000);
+        const bw=Math.min(vW*0.6,320),bh=14,bx=(vW-bw)/2,by=vH-28;
+        ctx.fillStyle="rgba(0,0,0,0.55)";
+        rRect(ctx,bx-6,by-6,bw+12,bh+12,6);ctx.fill();
+        ctx.fillStyle="#112211";
+        rRect(ctx,bx,by,bw,bh,4);ctx.fill();
+        ctx.fillStyle="#00ff66";
+        if(prog>0){rRect(ctx,bx,by,bw*prog,bh,4);ctx.fill();}
+        ctx.fillStyle="#aaffcc";ctx.font=`bold 11px 'Courier New',monospace`;ctx.textAlign="center";
+        ctx.fillText(`Score ${g.score}/1000 to unlock Maze`,vW/2,by-10);
+      }
       const newHS=hsBeatenRef.current;
       const scoreCol=newHS?"#ffdd00":"#00ffcc";
       const scoreBorder=newHS?"rgba(255,210,0,0.30)":"rgba(0,255,200,0.22)";
@@ -1497,42 +1542,47 @@ export default function SnakeBlast(): JSX.Element {
       const pos=(t: number)=>{const tt=t*0.00048*sm;const d=1+Math.sin(tt)*Math.sin(tt);return{x:W/2+W*0.40*Math.cos(tt)/d,y:H/2+H*0.24*Math.sin(tt)*Math.cos(tt)/d};};
       const pts=Array.from({length:N},(_,i)=>pos(ts-i*SP));
       const lw=T*0.55;
-      const path=():void=>{
-        ctx.beginPath();ctx.moveTo(pts[0].x,pts[0].y);
-        for(let i=1;i<N-1;i++){const mx=(pts[i].x+pts[i+1].x)/2,my=(pts[i].y+pts[i+1].y)/2;ctx.quadraticCurveTo(pts[i].x,pts[i].y,mx,my);}
-        ctx.lineTo(pts[N-1].x,pts[N-1].y);
-      };
+      // Build menu snake path ONCE — reused for all stroke passes
       ctx.save();ctx.lineCap="round";ctx.lineJoin="round";
+      ctx.beginPath();ctx.moveTo(pts[0].x,pts[0].y);
+      for(let i=1;i<N-1;i++){const mx=(pts[i].x+pts[i+1].x)/2,my=(pts[i].y+pts[i+1].y)/2;ctx.quadraticCurveTo(pts[i].x,pts[i].y,mx,my);}
+      ctx.lineTo(pts[N-1].x,pts[N-1].y);
       // Glow
-      path();ctx.lineWidth=lw+18;ctx.strokeStyle=skin.glow;ctx.globalAlpha=0.05;ctx.stroke();
-      path();ctx.lineWidth=lw+8;ctx.globalAlpha=0.10;ctx.stroke();ctx.globalAlpha=1;
+      ctx.lineWidth=lw+18;ctx.strokeStyle=skin.glow;ctx.globalAlpha=0.05;ctx.stroke();
+      ctx.lineWidth=lw+8;ctx.globalAlpha=0.10;ctx.stroke();ctx.globalAlpha=1;
       // Drop shadow
       ctx.shadowColor="rgba(0,0,0,0.5)";ctx.shadowBlur=10;ctx.shadowOffsetY=5;
-      path();ctx.lineWidth=lw;ctx.strokeStyle="rgba(0,0,0,0.01)";ctx.globalAlpha=0.5;ctx.stroke();
+      ctx.lineWidth=lw;ctx.strokeStyle="rgba(0,0,0,0.01)";ctx.globalAlpha=0.5;ctx.stroke();
       ctx.shadowColor="transparent";ctx.shadowBlur=0;ctx.shadowOffsetY=0;
       // Dark edge ring
-      path();ctx.lineWidth=lw+4;ctx.strokeStyle="rgba(0,0,0,0.5)";ctx.globalAlpha=0.40;ctx.stroke();
+      ctx.lineWidth=lw+4;ctx.strokeStyle="rgba(0,0,0,0.5)";ctx.globalAlpha=0.40;ctx.stroke();
       // Main body gradient
       const gr=ctx.createLinearGradient(pts[N-1].x,pts[N-1].y,pts[0].x,pts[0].y);
       gr.addColorStop(0,skin.a);gr.addColorStop(1,skin.b);
-      path();ctx.lineWidth=lw;ctx.strokeStyle=gr;ctx.globalAlpha=0.55;ctx.stroke();
+      ctx.lineWidth=lw;ctx.strokeStyle=gr;ctx.globalAlpha=0.55;ctx.stroke();
+      // Cylinder highlight (before tabs — path still valid)
+      ctx.lineWidth=lw*0.45;ctx.strokeStyle=lerpHex(skin.a,"#ffffff",0.28);ctx.globalAlpha=0.22;ctx.stroke();
+      ctx.globalAlpha=1;
       // Body tabs — alternating chevrons matching body gradient
       {const thw=lw*0.23,oY=lw*0.48,iY=lw*0.09;
+      ctx.save();
       for(let i=2;i<N-1;i++){
         const dx=pts[i].x-pts[i-1].x,dy=pts[i].y-pts[i-1].y;
         const len=Math.sqrt(dx*dx+dy*dy);if(len<2)continue;
-        const tAng=Math.atan2(dy,dx);
+        const cs=dx/len,sn=dy/len;
         const mx=(pts[i-1].x+pts[i].x)*0.5,my=(pts[i-1].y+pts[i].y)*0.5;
         const tf=clamp(i/Math.max(N-1,1),0,1);
         const tabCol=lerpHex(lerpHex(skin.b,skin.a,tf),"#000000",0.36);
-        const side=(i%2===0)?1:-1;
-        ctx.save();ctx.translate(mx,my);ctx.rotate(tAng);
+        const so=(i%2===0)?oY:-oY;
+        const si2=(i%2===0)?iY:-iY;
         ctx.fillStyle=tabCol;ctx.globalAlpha=0.48;
-        ctx.beginPath();ctx.moveTo(-thw,side*oY);ctx.lineTo(0,side*iY);ctx.lineTo(thw,side*oY);ctx.closePath();ctx.fill();
-        ctx.restore();
-      }}
-      // Cylinder highlight
-      path();ctx.lineWidth=lw*0.45;ctx.strokeStyle=lerpHex(skin.a,"#ffffff",0.28);ctx.globalAlpha=0.22;ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(mx-thw*cs-so*sn, my-thw*sn+so*cs);
+        ctx.lineTo(mx-si2*sn,        my+si2*cs);
+        ctx.lineTo(mx+thw*cs-so*sn, my+thw*sn+so*cs);
+        ctx.closePath();ctx.fill();
+      }
+      ctx.restore();}
       ctx.globalAlpha=1;ctx.restore();
       // Head
       const hp=pts[0],pp=pts[1];
@@ -1576,16 +1626,24 @@ export default function SnakeBlast(): JSX.Element {
 
     const drawStars=(W: number,H: number,ts: number):void=>{
       const sm=stRef.current.speed==="Fast"?2.2:stRef.current.speed==="Slow"?0.45:1;
-      for(let i=0;i<140;i++){
-        const x=((i*7919+ts*0.016*(i%8+0.4)*sm)%W+W)%W;
-        const y=((i*5231+i*2.3)%H);
-        const a=Math.pow(Math.max(0,Math.sin(ts*0.0045*sm+i*2.1)),5)*0.95+0.02;
-        const r=(i%4+1)*0.5;
-        const ri=70+i%80,gi=110+i*2%110,bi=200+i%55;
-        ctx.fillStyle=`rgba(${ri},${gi},${bi},${a})`;
-        ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.fill();
-        if(a>0.65){ctx.fillStyle=`rgba(${ri},${gi},${bi},${a*0.25})`;ctx.beginPath();ctx.arc(x,y,r*3.5,0,Math.PI*2);ctx.fill();}
+      // Batch stars into 6 opacity tiers — cuts state changes from 90→6
+      ctx.save();
+      for(let tier=0;tier<6;tier++){
+        const minA=tier/6,maxA=(tier+1)/6;
+        ctx.beginPath();
+        for(let i=0;i<90;i++){
+          const a=Math.pow(Math.max(0,Math.sin(ts*0.0045*sm+i*2.1)),5)*0.95+0.02;
+          if(a<minA||a>=maxA)continue;
+          const x=((i*7919+ts*0.016*(i%8+0.4)*sm)%W+W)%W;
+          const y=(i*5231+i*2.3)%H;
+          const r=(i%4+1)*0.5;
+          ctx.moveTo(x+r,y);ctx.arc(x,y,r,0,Math.PI*2);
+        }
+        ctx.globalAlpha=(minA+maxA)/2;
+        ctx.fillStyle=`rgba(140,180,255,1)`;
+        ctx.fill();
       }
+      ctx.globalAlpha=1;ctx.restore();
     };
 
     const renderWorld=(g: GameState,alpha: number,ts: number):void=>{
@@ -1596,93 +1654,171 @@ export default function SnakeBlast(): JSX.Element {
       const ty0=Math.max(0,(camY/T|0)-1);
       const tx1=Math.min(g.wt-1,tx0+(W/T|0)+3);
       const ty1=Math.min(g.wt-1,ty0+(H/T|0)+3);
-      // Tiles
-      const e=4; // edge shadow width in px
-      for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++){
-        const fl=g.tiles[ty*g.wt+tx];
-        const px=tx*T,py=ty*T;
-        if(g.mapType==="Void"||g.mapType==="Practice"){
-          // Open maps: only render border-wall energy barriers; floor tiles let bg show through
-          if(!fl){
-            const bCol=g.mapType==="Practice"?PRACTICE_BARRIER_COL:g.voidTheme!.barrierCol;
-            const bBg=g.mapType==="Practice"?"#010c04":g.voidTheme!.bg;
-            ctx.fillStyle=bBg;ctx.fillRect(px,py,T,T);
-            ctx.strokeStyle=bCol;ctx.lineWidth=1.5;
-            ctx.shadowColor=bCol;ctx.shadowBlur=12;
-            ctx.strokeRect(px+1,py+1,T-2,T-2);
-            ctx.shadowBlur=0;
-          }
-          // floor tiles: skip — background fill already covers them
-        } else if(fl){
-          // Floor tile (Maze or Forest)
-          if(g.mapType==="Forest"){
-            const ft=g.forestTheme!;
-            ctx.fillStyle=ft.floor;ctx.fillRect(px,py,T,T);
-            ctx.fillStyle="rgba(0,0,0,0.28)";
-            ctx.fillRect(px,py,T,e);ctx.fillRect(px,py,e,T);
-            ctx.fillStyle="rgba(255,255,255,0.04)";
-            ctx.fillRect(px,py+T-e,T,e);ctx.fillRect(px+T-e,py,e,T);
-            ctx.strokeStyle=ft.grid;ctx.lineWidth=0.8;ctx.strokeRect(px+.5,py+.5,T-1,T-1);
-          } else {
-            // Maze floor base
-            ctx.fillStyle=g.theme.floor;ctx.fillRect(px,py,T,T);
-            // 3-D inset edges — dark top+left (shadow), lighter bottom+right (reflection)
-            ctx.fillStyle="rgba(0,0,0,0.32)";
-            ctx.fillRect(px,py,T,e);          // top
-            ctx.fillRect(px,py,e,T);          // left
-            ctx.fillStyle="rgba(255,255,255,0.06)";
-            ctx.fillRect(px,py+T-e,T,e);      // bottom
-            ctx.fillRect(px+T-e,py,e,T);      // right
-            // Grid line
-            ctx.strokeStyle=g.theme.grid;ctx.lineWidth=0.8;ctx.strokeRect(px+.5,py+.5,T-1,T-1);
-          }
-        } else {
-          // Wall tile (Maze or Forest)
-          if(g.mapType==="Forest"){
-            const ft=g.forestTheme!;
-            // Ground under tree
-            ctx.fillStyle=ft.treeGround;ctx.fillRect(px,py,T,T);
-            // Trunk
-            ctx.fillStyle=ft.trunk;
-            ctx.fillRect(px+(T*0.38)|0,py+(T*0.62)|0,(T*0.24)|0,(T*0.38)|0);
-            // Canopy drop shadow
-            ctx.shadowColor="rgba(0,0,0,0.55)";ctx.shadowBlur=10;ctx.shadowOffsetY=5;
-            ctx.fillStyle=ft.canopy1;
-            ctx.beginPath();ctx.arc(px+T*0.50,py+T*0.38,T*0.43,0,Math.PI*2);ctx.fill();
-            ctx.shadowColor="transparent";ctx.shadowBlur=0;ctx.shadowOffsetY=0;
-            // Canopy mid tone
-            ctx.fillStyle=ft.canopy2;ctx.globalAlpha=0.80;
-            ctx.beginPath();ctx.arc(px+T*0.50,py+T*0.34,T*0.33,0,Math.PI*2);ctx.fill();
-            ctx.globalAlpha=1;
-            // Canopy highlight
-            ctx.fillStyle=ft.canopy3;ctx.globalAlpha=0.55;
-            ctx.beginPath();ctx.arc(px+T*0.38,py+T*0.24,T*0.16,0,Math.PI*2);ctx.fill();
-            ctx.globalAlpha=1;
-          } else {
-            // Maze wall — themed fill with outline
-            ctx.fillStyle=g.theme.wall;ctx.fillRect(px,py,T,T);
-            ctx.strokeStyle=g.theme.wallStroke;ctx.lineWidth=1.2;ctx.strokeRect(px+.5,py+.5,T-1,T-1);
-          }
+      // Tiles — batched by pass to minimise fillStyle/strokeStyle state changes
+      const e=4;
+      if(g.mapType==="Practice"){
+        // Pass 1: floor base
+        ctx.fillStyle="#0d1f0d";
+        for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++){
+          if(g.tiles[ty*g.wt+tx])ctx.fillRect(tx*T,ty*T,T,T);
         }
+        // Pass 2: floor top+left shadow
+        ctx.fillStyle="rgba(0,0,0,0.30)";
+        for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++){
+          if(!g.tiles[ty*g.wt+tx])continue;
+          const px=tx*T,py=ty*T;ctx.fillRect(px,py,T,e);ctx.fillRect(px,py,e,T);
+        }
+        // Pass 3: floor bottom+right highlight
+        ctx.fillStyle="rgba(0,255,80,0.04)";
+        for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++){
+          if(!g.tiles[ty*g.wt+tx])continue;
+          const px=tx*T,py=ty*T;ctx.fillRect(px,py+T-e,T,e);ctx.fillRect(px+T-e,py,e,T);
+        }
+        // Pass 4: floor grid
+        ctx.beginPath();
+        for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++){
+          if(g.tiles[ty*g.wt+tx])ctx.rect(tx*T+.5,ty*T+.5,T-1,T-1);
+        }
+        ctx.strokeStyle="rgba(0,255,80,0.10)";ctx.lineWidth=0.6;ctx.stroke();
+        // Pass 5: walls
+        ctx.fillStyle="#010c04";
+        for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++){
+          if(!g.tiles[ty*g.wt+tx])ctx.fillRect(tx*T,ty*T,T,T);
+        }
+        // Pass 6: wall glow outline
+        ctx.strokeStyle=PRACTICE_BARRIER_COL;ctx.lineWidth=1.5;ctx.shadowColor=PRACTICE_BARRIER_COL;ctx.shadowBlur=10;
+        ctx.beginPath();
+        for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++){
+          if(!g.tiles[ty*g.wt+tx])ctx.rect(tx*T+1,ty*T+1,T-2,T-2);
+        }
+        ctx.stroke();ctx.shadowBlur=0;
+      } else if(g.mapType==="Void"){
+        ctx.fillStyle=g.voidTheme!.bg;
+        for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++){
+          if(!g.tiles[ty*g.wt+tx])ctx.fillRect(tx*T,ty*T,T,T);
+        }
+        ctx.strokeStyle=g.voidTheme!.barrierCol;ctx.lineWidth=1.5;ctx.shadowColor=g.voidTheme!.barrierCol;ctx.shadowBlur=12;
+        ctx.beginPath();
+        for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++){
+          if(!g.tiles[ty*g.wt+tx])ctx.rect(tx*T+1,ty*T+1,T-2,T-2);
+        }
+        ctx.stroke();ctx.shadowBlur=0;
+      } else if(g.mapType==="Forest"){
+        // Batched multi-pass rendering — one state change per pass instead of ~10 per tile
+        const ft=g.forestTheme!;
+        // Pass 1: floor base
+        ctx.fillStyle=ft.floor;
+        for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++){
+          if(g.tiles[ty*g.wt+tx])ctx.fillRect(tx*T,ty*T,T,T);
+        }
+        // Pass 2: floor top+left shadow
+        ctx.fillStyle="rgba(0,0,0,0.28)";
+        for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++){
+          if(!g.tiles[ty*g.wt+tx])continue;
+          const px=tx*T,py=ty*T;ctx.fillRect(px,py,T,e);ctx.fillRect(px,py,e,T);
+        }
+        // Pass 3: floor bottom+right highlight
+        ctx.fillStyle="rgba(255,255,255,0.04)";
+        for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++){
+          if(!g.tiles[ty*g.wt+tx])continue;
+          const px=tx*T,py=ty*T;ctx.fillRect(px,py+T-e,T,e);ctx.fillRect(px+T-e,py,e,T);
+        }
+        // Pass 4: floor grid (batched path)
+        ctx.beginPath();
+        for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++){
+          if(g.tiles[ty*g.wt+tx])ctx.rect(tx*T+.5,ty*T+.5,T-1,T-1);
+        }
+        ctx.strokeStyle=ft.grid;ctx.lineWidth=0.8;ctx.stroke();
+        // Pass 5: tree ground
+        ctx.fillStyle=ft.treeGround;
+        for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++){
+          if(!g.tiles[ty*g.wt+tx])ctx.fillRect(tx*T,ty*T,T,T);
+        }
+        // Pass 6: trunks
+        ctx.fillStyle=ft.trunk;
+        for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++){
+          if(!g.tiles[ty*g.wt+tx])ctx.fillRect((tx*T+(T*0.38))|0,(ty*T+(T*0.62))|0,(T*0.24)|0,(T*0.38)|0);
+        }
+        // Pass 7: canopy1 — shadow set once, all arcs in one path
+        ctx.shadowColor="rgba(0,0,0,0.55)";ctx.shadowBlur=8;ctx.shadowOffsetY=4;
+        ctx.fillStyle=ft.canopy1;ctx.beginPath();
+        for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++){
+          if(!g.tiles[ty*g.wt+tx]){const px=tx*T,py=ty*T;ctx.moveTo(px+T*0.93,py+T*0.38);ctx.arc(px+T*0.50,py+T*0.38,T*0.43,0,Math.PI*2);}
+        }
+        ctx.fill();ctx.shadowBlur=0;ctx.shadowOffsetY=0;ctx.shadowColor="transparent";
+        // Pass 8: canopy2
+        ctx.fillStyle=ft.canopy2;ctx.globalAlpha=0.80;ctx.beginPath();
+        for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++){
+          if(!g.tiles[ty*g.wt+tx]){const px=tx*T,py=ty*T;ctx.moveTo(px+T*0.83,py+T*0.34);ctx.arc(px+T*0.50,py+T*0.34,T*0.33,0,Math.PI*2);}
+        }
+        ctx.fill();
+        // Pass 9: canopy3
+        ctx.fillStyle=ft.canopy3;ctx.globalAlpha=0.55;ctx.beginPath();
+        for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++){
+          if(!g.tiles[ty*g.wt+tx]){const px=tx*T,py=ty*T;ctx.moveTo(px+T*0.54,py+T*0.24);ctx.arc(px+T*0.38,py+T*0.24,T*0.16,0,Math.PI*2);}
+        }
+        ctx.fill();ctx.globalAlpha=1;
+      } else {
+        // Maze — batched by draw type: one state change per pass instead of per tile
+        const th=g.theme;
+        // Pass 1: floor base
+        ctx.fillStyle=th.floor;
+        for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++){
+          if(g.tiles[ty*g.wt+tx])ctx.fillRect(tx*T,ty*T,T,T);
+        }
+        // Pass 2: floor top+left shadow
+        ctx.fillStyle="rgba(0,0,0,0.32)";
+        for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++){
+          if(!g.tiles[ty*g.wt+tx])continue;
+          const px=tx*T,py=ty*T;ctx.fillRect(px,py,T,e);ctx.fillRect(px,py,e,T);
+        }
+        // Pass 3: floor bottom+right highlight
+        ctx.fillStyle="rgba(255,255,255,0.06)";
+        for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++){
+          if(!g.tiles[ty*g.wt+tx])continue;
+          const px=tx*T,py=ty*T;ctx.fillRect(px,py+T-e,T,e);ctx.fillRect(px+T-e,py,e,T);
+        }
+        // Pass 4: floor grid (single batched path)
+        ctx.beginPath();
+        for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++){
+          if(g.tiles[ty*g.wt+tx])ctx.rect(tx*T+.5,ty*T+.5,T-1,T-1);
+        }
+        ctx.strokeStyle=th.grid;ctx.lineWidth=0.8;ctx.stroke();
+        // Pass 5: wall base
+        ctx.fillStyle=th.wall;
+        for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++){
+          if(!g.tiles[ty*g.wt+tx])ctx.fillRect(tx*T,ty*T,T,T);
+        }
+        // Pass 6: wall outlines (single batched path)
+        ctx.beginPath();
+        for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++){
+          if(!g.tiles[ty*g.wt+tx])ctx.rect(tx*T+.5,ty*T+.5,T-1,T-1);
+        }
+        ctx.strokeStyle=th.wallStroke;ctx.lineWidth=1.2;ctx.stroke();
       }
-      // Void stars
+      // Void stars — batched by opacity tier to reduce state changes
       if(g.mapType==="Void"&&g.voidTheme){
         const vt=g.voidTheme;
-        ctx.save();
-        for(let i=0;i<280;i++){
-          const stx=((i*6271+i*31)%(g.wt-2)+1)*T+(i*13%T);
-          const sty=((i*5231+i*19)%(g.wt-2)+1)*T+(i*17%T);
-          if(stx<(tx0-1)*T||stx>(tx1+2)*T||sty<(ty0-1)*T||sty>(ty1+2)*T)continue;
-          const sa=0.15+((i*37)%100)*0.005;
-          const sr=0.5+(i%3)*0.5;
-          ctx.fillStyle=vt.shipGlow;ctx.globalAlpha=sa;
-          ctx.beginPath();ctx.arc(stx,sty,sr,0,Math.PI*2);ctx.fill();
+        ctx.save();ctx.fillStyle=vt.shipGlow;
+        // Draw in 4 opacity tiers to limit state changes (was 140 individual fillStyle changes)
+        for(let tier=0;tier<4;tier++){
+          ctx.globalAlpha=0.12+tier*0.10;
+          ctx.beginPath();
+          for(let i=tier;i<140;i+=4){
+            const stx=((i*6271+i*31)%(g.wt-2)+1)*T+(i*13%T);
+            const sty=((i*5231+i*19)%(g.wt-2)+1)*T+(i*17%T);
+            if(stx<(tx0-1)*T||stx>(tx1+2)*T||sty<(ty0-1)*T||sty>(ty1+2)*T)continue;
+            const sr=0.5+(i%3)*0.5;
+            ctx.moveTo(stx+sr,sty);ctx.arc(stx,sty,sr,0,Math.PI*2);
+          }
+          ctx.fill();
         }
         ctx.globalAlpha=1;ctx.restore();
       }
       // Shapes
       for(const sh of g.shapes){
-        const sset=new Set(sh.tiles.map(t=>`${t.x},${t.y}`));
+        if(!sh.tileSet)sh.tileSet=new Set(sh.tiles.map(t=>`${t.x},${t.y}`));
+        const sset=sh.tileSet;
         const pulse=0.12+0.08*Math.sin(ts*0.003);
         const [cr,cg,cb]=hRgb(sh.col||"#aa00ff");
         const ir=Math.min(255,cr+50),ig=Math.min(255,cg+60),ib=Math.min(255,cb+55);
@@ -1691,12 +1827,17 @@ export default function SnakeBlast(): JSX.Element {
           ctx.fillStyle=`rgba(${cr},${cg},${cb},${0.13+pulse})`;ctx.fillRect(x*T,y*T,T,T);
           ctx.fillStyle=`rgba(${ir},${ig},${ib},${0.05+pulse*0.4})`;ctx.fillRect(x*T+5,y*T+5,T-10,T-10);
         }
+        // Batch all edges of this shape into one path → one stroke call
         ctx.save();ctx.strokeStyle=`rgba(${ir},${ig},${ib},0.90)`;
         ctx.lineWidth=2;ctx.shadowColor=sh.col||"#cc00ff";ctx.shadowBlur=14;
+        ctx.beginPath();
         for(const{x,y}of sh.tiles){
           if(x<tx0-1||x>tx1+1||y<ty0-1||y>ty1+1)continue;
-          for(const[ddx,ddy,dax,day,dbx,dby]of SHAPE_EDGE_DIRS){if(!sset.has(`${x+ddx},${y+ddy}`)){ctx.beginPath();ctx.moveTo((x+dax)*T,(y+day)*T);ctx.lineTo((x+dbx)*T,(y+dby)*T);ctx.stroke();}}
+          for(const[ddx,ddy,dax,day,dbx,dby]of SHAPE_EDGE_DIRS){
+            if(!sset.has(`${x+ddx},${y+ddy}`)){ctx.moveTo((x+dax)*T,(y+day)*T);ctx.lineTo((x+dbx)*T,(y+dby)*T);}
+          }
         }
+        ctx.stroke();
         ctx.restore();
       }
       // Pending fill flash — tiles light up before being removed
@@ -1720,12 +1861,13 @@ export default function SnakeBlast(): JSX.Element {
         }
         ctx.restore();
       }
-      // Fruits
+      // Fruits — single save/restore for the whole batch; fast path for t=0 (most common)
+      ctx.save();
+      ctx.textAlign="center";ctx.textBaseline="middle";
       for(const f of g.fruits){
         const{x,y}=f;
         if(x<tx0||x>tx1||y<ty0||y>ty1)continue;
         const cx2=x*T+T/2,cy2=y*T+T/2;
-        ctx.save();
         if(f.pw){
           // ── Powerup fruit ─────────────────────────────────────────────────
           const def=POWERUP_DEFS.find(p=>p.id===f.pw);
@@ -1733,58 +1875,55 @@ export default function SnakeBlast(): JSX.Element {
             const spin=ts*0.0022;
             const pulse=0.88+0.12*Math.sin(ts*0.006+x*1.1);
             const r=T*0.40*pulse;
-            // Spinning arc rings
             ctx.strokeStyle=def.col;ctx.lineWidth=2.5;
             ctx.globalAlpha=0.70+0.22*Math.sin(ts*0.007);
             ctx.shadowColor=def.glow;ctx.shadowBlur=20;
             ctx.beginPath();ctx.arc(cx2,cy2,r*1.58,spin,spin+Math.PI*1.55);ctx.stroke();
             ctx.beginPath();ctx.arc(cx2,cy2,r*1.58,spin+Math.PI,spin+Math.PI*2.55);ctx.stroke();
-            // Core circle
             ctx.globalAlpha=0.90;ctx.shadowBlur=0;
             const gpw=ctx.createRadialGradient(cx2-3,cy2-3,1,cx2,cy2,r);
             gpw.addColorStop(0,"#ffffff");gpw.addColorStop(0.35,def.col);gpw.addColorStop(1,def.glow);
             ctx.fillStyle=gpw;ctx.beginPath();ctx.arc(cx2,cy2,r,0,Math.PI*2);ctx.fill();
-            // Specular
-            ctx.globalAlpha=0.45;ctx.fillStyle="#fff";ctx.shadowBlur=0;
+            ctx.globalAlpha=0.45;ctx.fillStyle="#fff";
             ctx.beginPath();ctx.arc(cx2-r*0.28,cy2-r*0.32,r*0.30,0,Math.PI*2);ctx.fill();
-            // Icon
-            ctx.globalAlpha=1;ctx.textAlign="center";ctx.textBaseline="middle";
-            ctx.font=`${(r*0.95)|0}px serif`;
+            ctx.globalAlpha=1;ctx.font=`${(r*0.95)|0}px serif`;
             ctx.shadowColor=def.glow;ctx.shadowBlur=10;
             ctx.fillText(def.icon,cx2,cy2+r*0.04);
-            ctx.shadowBlur=0;
+            ctx.shadowBlur=0;ctx.globalAlpha=1;
           }
+        } else if(f.t===0){
+          // ── Common fruit — fast flat render (no gradient, no shadow) ──────
+          const ft=FRUIT_TYPES[0];
+          const r=T*ft.r*(0.92+0.08*Math.sin(ts*0.005+x*0.7));
+          ctx.fillStyle=ft.c1;
+          ctx.beginPath();ctx.arc(cx2,cy2,r,0,Math.PI*2);ctx.fill();
+          ctx.globalAlpha=0.30;ctx.fillStyle="#fff";
+          ctx.beginPath();ctx.arc(cx2-r*0.3,cy2-r*0.35,r*0.28,0,Math.PI*2);ctx.fill();
+          ctx.globalAlpha=1;
         } else {
-          // ── Regular fruit ─────────────────────────────────────────────────
-          const ft=FRUIT_TYPES[f.t||0];
+          // ── Uncommon / rare / epic fruit ──────────────────────────────────
+          const ft=FRUIT_TYPES[f.t];
           const pulse=0.92+0.08*Math.sin(ts*0.005+x*0.7);
           const r=T*ft.r*pulse;
-          // Outer glow — stronger for rarer fruits
           ctx.shadowColor=ft.glow;ctx.shadowBlur=14+f.t*8;
           const grd=ctx.createRadialGradient(cx2-2,cy2-2,1,cx2,cy2,r);
           grd.addColorStop(0,ft.c0);grd.addColorStop(0.55,ft.c1);grd.addColorStop(1,ft.c2);
           ctx.fillStyle=grd;ctx.beginPath();ctx.arc(cx2,cy2,r,0,Math.PI*2);ctx.fill();
-          // Specular highlight
           ctx.shadowBlur=0;ctx.globalAlpha=0.38;ctx.fillStyle="#fff";
           ctx.beginPath();ctx.arc(cx2-r*0.3,cy2-r*0.35,r*0.32,0,Math.PI*2);ctx.fill();
-          // Ring for rare (t≥2) and epic (t≥3) fruits
           if(f.t>=2){
             const ringA=0.35+0.25*Math.sin(ts*0.004+x);
             ctx.globalAlpha=ringA;ctx.strokeStyle=ft.glow;
-            ctx.lineWidth=f.t>=3?2.5:1.5;
-            ctx.shadowColor=ft.glow;ctx.shadowBlur=10;
+            ctx.lineWidth=f.t>=3?2.5:1.5;ctx.shadowColor=ft.glow;ctx.shadowBlur=10;
             ctx.beginPath();ctx.arc(cx2,cy2,r*(f.t>=3?1.55:1.40),0,Math.PI*2);ctx.stroke();
           }
-          // Label for uncommon+ showing grow amount
-          if(f.t>=1){
-            ctx.globalAlpha=0.85;ctx.shadowBlur=0;
-            ctx.fillStyle="#fff";ctx.textAlign="center";ctx.textBaseline="middle";
-            ctx.font=`bold ${8+f.t*2}px "Courier New"`;
-            ctx.fillText(`+${ft.grow}`,cx2,cy2+r+8+f.t);
-          }
+          ctx.globalAlpha=0.85;ctx.shadowBlur=0;ctx.fillStyle="#fff";
+          ctx.font=`bold ${8+f.t*2}px "Courier New"`;
+          ctx.fillText(`+${ft.grow}`,cx2,cy2+r+8+f.t);
+          ctx.globalAlpha=1;ctx.shadowBlur=0;
         }
-        ctx.restore();
       }
+      ctx.restore();
       drawSnake(g,alpha,ts);
       // ── World-space burst particles ────────────────────────────────────────
       if(particlesRef.current.length>0){
@@ -1793,9 +1932,8 @@ export default function SnakeBlast(): JSX.Element {
           const al=Math.max(0,Math.min(p.life,1))*0.92;
           if(al<0.02)continue;
           ctx.globalAlpha=al;ctx.fillStyle=p.color;
-          ctx.save();ctx.translate(p.wx,p.wy);
-          ctx.fillRect(-p.size*0.5,-p.size*0.35,p.size,p.size*0.7);
-          ctx.restore();
+          // Direct coords — no save/restore/translate per particle
+          ctx.fillRect(p.wx-p.size*0.5,p.wy-p.size*0.35,p.size,p.size*0.7);
         }
         ctx.globalAlpha=1;ctx.restore();
       }
@@ -1992,7 +2130,7 @@ export default function SnakeBlast(): JSX.Element {
             g.shapes=g.shapes.filter(sh=>!sh.tiles.every(t=>rem.has(`${t.x},${t.y}`)));
             addScore(bonus,cx,cy,g);
             sndBlast();
-            for(let b=0;b<8;b++)pops.current.push({wx:cx*T+T/2+(Math.random()-.5)*T*4,wy:cy*T+(Math.random()-.5)*T*3,text:"✦",col:"#cc00ff",life:1.3});
+            for(let b=0;b<8;b++)pops.current.push({wx:cx*T+T/2+(Math.random()-.5)*T*4,wy:cy*T+(Math.random()-.5)*T*3,text:"++",col:"#cc00ff",life:1.3});
             spawnParticles(cx*T+T/2,cy*T+T/2,44,"#cc44ff",260,6);
             spawnParticles(cx*T+T/2,cy*T+T/2,22,"#ffffff",200,4);
             spawnParticles(cx*T+T/2,cy*T+T/2,16,"#ffaaff",320,8);
@@ -2019,6 +2157,7 @@ export default function SnakeBlast(): JSX.Element {
         for(const b of g.bulges)b.t+=dt/700;g.bulges=g.bulges.filter(b=>b.t<1);
         for(const p of particlesRef.current){p.wx+=p.vx*dt/1000;p.wy+=p.vy*dt/1000;p.vy+=300*dt/1000;p.life-=dt/900;}
         particlesRef.current=particlesRef.current.filter(p=>p.life>0);
+        if(particlesRef.current.length>350)particlesRef.current.length=350;
         if(g.combo>0){g.comboTimer-=dt;if(g.comboTimer<=0){g.combo=0;g.comboTimer=0;}}
         if(g.comboPop){g.comboPop.timer-=dt;if(g.comboPop.timer<=0)g.comboPop=null;}
         // Tick powerup timers and recompute tickDur
@@ -2343,30 +2482,30 @@ export default function SnakeBlast(): JSX.Element {
       const can=coins>=price;
       return(
         <div style={{textAlign:"center",marginBottom:10}}>
-          <div style={{fontSize:10,letterSpacing:2,color:"rgba(255,200,50,0.85)",marginBottom:7,
-            fontFamily:"Courier New"}}>🔒  {price}  🪙</div>
+          <div style={{fontSize:13,letterSpacing:2,color:"rgba(255,200,50,0.90)",marginBottom:7,
+            fontFamily:"Courier New"}}>LOCKED - {price} coins</div>
           <button onClick={()=>buyItem(cat,viewId)}
-            style={{background:can?"rgba(255,200,50,0.13)":"rgba(255,50,50,0.06)",
-              border:`1px solid ${can?"rgba(255,200,50,0.45)":"rgba(255,60,60,0.22)"}`,
-              color:can?"#ffdd44":"rgba(255,80,80,0.55)",padding:"5px 22px",
-              fontSize:10,fontFamily:"Courier New",cursor:can?"pointer":"default",
+            style={{background:can?"rgba(255,200,50,0.16)":"rgba(255,50,50,0.08)",
+              border:`1px solid ${can?"rgba(255,200,50,0.55)":"rgba(255,60,60,0.28)"}`,
+              color:can?"#ffdd44":"rgba(255,80,80,0.65)",padding:"7px 26px",
+              fontSize:13,fontFamily:"Courier New",cursor:can?"pointer":"default",
               letterSpacing:2,borderRadius:6,transition:"all 0.15s"}}>
-            {can?"UNLOCK":"NEED  "+(price-coins)+"  MORE  🪙"}
+            {can?"UNLOCK":"NEED  "+(price-coins)+"  MORE  COINS"}
           </button>
         </div>
       );
     }
     if(viewId===equippedId)return(
-      <div style={{height:24,display:"flex",alignItems:"center",justifyContent:"center",
-        fontSize:9,letterSpacing:2,color:`rgba(${rgb},0.50)`,marginBottom:8}}>
+      <div style={{height:28,display:"flex",alignItems:"center",justifyContent:"center",
+        fontSize:13,letterSpacing:2,color:`rgba(${rgb},0.65)`,marginBottom:8}}>
         ✓  EQUIPPED
       </div>
     );
     return(
       <div style={{textAlign:"center",marginBottom:10}}>
         <button onClick={()=>{sndClick();onEquip();}}
-          style={{background:`rgba(${rgb},0.10)`,border:`1px solid rgba(${rgb},0.40)`,
-            color:accent,padding:"5px 22px",fontSize:10,fontFamily:"Courier New",
+          style={{background:`rgba(${rgb},0.12)`,border:`1px solid rgba(${rgb},0.50)`,
+            color:accent,padding:"7px 26px",fontSize:13,fontFamily:"Courier New",
             cursor:"pointer",letterSpacing:2,borderRadius:6,transition:"all 0.15s"}}>
           EQUIP
         </button>
@@ -2376,16 +2515,16 @@ export default function SnakeBlast(): JSX.Element {
   const equipLine=(viewId: string,equippedId: string,accent: string,onEquip: ()=>void): JSX.Element=>{
     const rgb=hexRgb(accent);
     if(viewId===equippedId)return(
-      <div style={{height:24,display:"flex",alignItems:"center",justifyContent:"center",
-        fontSize:9,letterSpacing:2,color:`rgba(${rgb},0.50)`,marginBottom:8}}>
+      <div style={{height:28,display:"flex",alignItems:"center",justifyContent:"center",
+        fontSize:13,letterSpacing:2,color:`rgba(${rgb},0.65)`,marginBottom:8}}>
         ✓  EQUIPPED
       </div>
     );
     return(
       <div style={{textAlign:"center",marginBottom:10}}>
         <button onClick={()=>{sndClick();onEquip();}}
-          style={{background:`rgba(${rgb},0.10)`,border:`1px solid rgba(${rgb},0.40)`,
-            color:accent,padding:"5px 22px",fontSize:10,fontFamily:"Courier New",
+          style={{background:`rgba(${rgb},0.12)`,border:`1px solid rgba(${rgb},0.50)`,
+            color:accent,padding:"7px 26px",fontSize:13,fontFamily:"Courier New",
             cursor:"pointer",letterSpacing:2,borderRadius:6,transition:"all 0.15s"}}>
           EQUIP
         </button>
@@ -2396,15 +2535,15 @@ export default function SnakeBlast(): JSX.Element {
   const arRow=(label: string, val: string, onL: ()=>void, onR: ()=>void, accent: string): JSX.Element=>{
     const rgb=hexRgb(accent);
     return(
-      <div style={{marginBottom:18,textAlign:"center",width:"100%"}}>
-        <div style={{fontSize:9,letterSpacing:4,color:`rgba(${rgb},0.48)`,marginBottom:6,fontFamily:"Courier New"}}>{label}</div>
+      <div style={{marginBottom:20,textAlign:"center",width:"100%"}}>
+        <div style={{fontSize:12,letterSpacing:4,color:`rgba(${rgb},0.60)`,marginBottom:6,fontFamily:"Courier New"}}>{label}</div>
         <div style={{display:"flex",alignItems:"center",justifyContent:"center"}}>
-          <button onClick={onL} style={{background:"transparent",border:"none",color:accent,fontSize:32,cursor:"pointer",
+          <button onClick={onL} style={{background:"transparent",border:"none",color:accent,fontSize:36,cursor:"pointer",
             padding:"0 20px",fontFamily:"Courier New",lineHeight:1,
             textShadow:`0 0 10px ${accent}88`,transition:"opacity 0.12s"}}>‹</button>
-          <div style={{flex:1,textAlign:"center",fontSize:14,letterSpacing:3,fontWeight:"bold",
+          <div style={{flex:1,textAlign:"center",fontSize:20,letterSpacing:3,fontWeight:"bold",
             color:accent,fontFamily:"Courier New",textShadow:`0 0 8px ${accent}55`}}>{val}</div>
-          <button onClick={onR} style={{background:"transparent",border:"none",color:accent,fontSize:32,cursor:"pointer",
+          <button onClick={onR} style={{background:"transparent",border:"none",color:accent,fontSize:36,cursor:"pointer",
             padding:"0 20px",fontFamily:"Courier New",lineHeight:1,
             textShadow:`0 0 10px ${accent}88`,transition:"opacity 0.12s"}}>›</button>
         </div>
@@ -2417,8 +2556,8 @@ export default function SnakeBlast(): JSX.Element {
     const pct=Math.round((mult-1)*100);
     const col=mult>1.01?accent:mult<0.99?"#ff5555":"rgba(160,160,160,0.35)";
     return(
-      <div style={{textAlign:"center",fontSize:9,fontFamily:"Courier New",letterSpacing:1,
-        color:col,marginTop:-12,marginBottom:10,opacity:0.88,pointerEvents:"none"}}>
+      <div style={{textAlign:"center",fontSize:12,fontFamily:"Courier New",letterSpacing:1,
+        color:col,marginTop:-10,marginBottom:10,opacity:0.92,pointerEvents:"none"}}>
         {icon}  {mult>1.01?"+":""}{pct}%  ·  ×{mult.toFixed(2)}  {label}
       </div>
     );
@@ -2429,18 +2568,18 @@ export default function SnakeBlast(): JSX.Element {
     const sCol=scoreMult>1.01?"#88ccff":scoreMult<0.99?"#ff5555":"rgba(160,160,160,0.45)";
     return(
       <div style={{display:"flex",gap:16,justifyContent:"center",marginBottom:12,
-        background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.08)",
-        borderRadius:8,padding:"8px 20px",flexWrap:"wrap"}}>
+        background:"rgba(255,255,255,0.08)",border:"1px solid rgba(255,255,255,0.15)",
+        borderRadius:8,padding:"10px 24px",flexWrap:"wrap"}}>
         <div style={{textAlign:"center"}}>
-          <div style={{fontSize:8,letterSpacing:3,color:"rgba(200,200,200,0.40)",fontFamily:"Courier New",marginBottom:2}}>COIN  MULT</div>
-          <div style={{fontSize:13,fontWeight:"bold",fontFamily:"Courier New",color:cCol,
-            textShadow:`0 0 10px ${cCol}88`}}>🪙  ×{coinMult.toFixed(2)}</div>
+          <div style={{fontSize:11,letterSpacing:3,color:"rgba(200,200,200,0.55)",fontFamily:"Courier New",marginBottom:2}}>COIN  MULT</div>
+          <div style={{fontSize:16,fontWeight:"bold",fontFamily:"Courier New",color:cCol,
+            textShadow:`0 0 10px ${cCol}88`}}>Coins  ×{coinMult.toFixed(2)}</div>
         </div>
-        <div style={{width:1,background:"rgba(255,255,255,0.08)",alignSelf:"stretch"}}/>
+        <div style={{width:1,background:"rgba(255,255,255,0.12)",alignSelf:"stretch"}}/>
         <div style={{textAlign:"center"}}>
-          <div style={{fontSize:8,letterSpacing:3,color:"rgba(200,200,200,0.40)",fontFamily:"Courier New",marginBottom:2}}>SCORE  MULT</div>
-          <div style={{fontSize:13,fontWeight:"bold",fontFamily:"Courier New",color:sCol,
-            textShadow:`0 0 10px ${sCol}88`}}>📊  ×{scoreMult.toFixed(2)}</div>
+          <div style={{fontSize:11,letterSpacing:3,color:"rgba(200,200,200,0.55)",fontFamily:"Courier New",marginBottom:2}}>SCORE  MULT</div>
+          <div style={{fontSize:16,fontWeight:"bold",fontFamily:"Courier New",color:sCol,
+            textShadow:`0 0 10px ${sCol}88`}}>S  ×{scoreMult.toFixed(2)}</div>
         </div>
       </div>
     );
@@ -2448,13 +2587,15 @@ export default function SnakeBlast(): JSX.Element {
 
   const mkBtn=(col: string,glow: string,label: string,onClick: ()=>void): JSX.Element=>(
     <button onClick={()=>{sndClick();onClick();}}
-      onMouseEnter={(e: React.MouseEvent<HTMLButtonElement>)=>(e.target as HTMLButtonElement).style.background=`rgba(${hexRgb(col.startsWith("#")?col:"#"+col)},0.09)`}
-      onMouseLeave={(e: React.MouseEvent<HTMLButtonElement>)=>(e.target as HTMLButtonElement).style.background="transparent"}
+      onMouseEnter={(e: React.MouseEvent<HTMLButtonElement>)=>(e.currentTarget.style.background=`rgba(${hexRgb(col.startsWith("#")?col:"#"+col)},0.09)`)}
+      onMouseLeave={(e: React.MouseEvent<HTMLButtonElement>)=>{e.currentTarget.style.background="transparent";e.currentTarget.style.transform="scale(1)";e.currentTarget.style.transition="transform 0.22s cubic-bezier(0.34,1.56,0.64,1)";}}
+      onPointerDown={(e: React.PointerEvent<HTMLButtonElement>)=>{e.currentTarget.style.transform="scale(0.91)";e.currentTarget.style.transition="transform 0.07s ease-in";}}
+      onPointerUp={(e: React.PointerEvent<HTMLButtonElement>)=>{e.currentTarget.style.transform="scale(1)";e.currentTarget.style.transition="transform 0.22s cubic-bezier(0.34,1.56,0.64,1)";}}
+      onPointerLeave={(e: React.PointerEvent<HTMLButtonElement>)=>{e.currentTarget.style.transform="scale(1)";e.currentTarget.style.transition="transform 0.22s cubic-bezier(0.34,1.56,0.64,1)";}}
       style={{background:"transparent",border:`2px solid #${col}`,color:`#${col}`,
-        padding:"13px 46px",fontSize:14,fontFamily:"Courier New",cursor:"pointer",
+        padding:"15px 52px",fontSize:17,fontFamily:"Courier New",cursor:"pointer",
         letterSpacing:3,borderRadius:8,
-        boxShadow:`0 0 22px #${glow}44`,textShadow:`0 0 10px #${col}`,
-        transition:"all 0.2s"}}>{label}</button>
+        boxShadow:`0 0 22px #${glow}44`,textShadow:`0 0 10px #${col}`}}>{label}</button>
   );
 
   const dBtn: React.CSSProperties={position:"absolute",width:46,height:46,
@@ -2499,32 +2640,36 @@ export default function SnakeBlast(): JSX.Element {
         @keyframes menuFadeIn    {from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
         @keyframes menuSlideRight{from{opacity:0;transform:translateX(32px)}to{opacity:1;transform:translateX(0)}}
         @keyframes menuSlideLeft {from{opacity:0;transform:translateX(-32px)}to{opacity:1;transform:translateX(0)}}
-        @keyframes btnPop        {0%{transform:scale(1)}35%{transform:scale(0.91)}100%{transform:scale(1)}}
-        button:active            {animation:btnPop 0.17s ease-out!important}
+        @keyframes blink         {50%{opacity:0}}
+        button                   {touch-action:manipulation}
+        [data-noscroll]::-webkit-scrollbar{display:none}
       `}</style>
       <canvas ref={cvs} style={{display:"block",position:"absolute",inset:0,width:"100%",height:"100%"}}/>
 
       {screen==="menu"&&(
         <div style={{position:"absolute",inset:0,display:"flex",
           flexDirection:"column",alignItems:"center",justifyContent:"center",
-          overflowY:"auto",padding:"24px 0"}}>
+          overflow:"hidden",padding:0}}>
           <div style={{position:"absolute",top:16,right:22,textAlign:"right",pointerEvents:"none"}}>
-            <div style={{fontSize:18,letterSpacing:2,color:"rgba(255,200,50,0.90)",
+            <div style={{fontSize:28,letterSpacing:2,color:"rgba(255,200,50,0.90)",
               fontFamily:"Courier New",textShadow:"0 0 18px rgba(255,180,0,0.70)"}}>
-              🪙  {coins}
+              Coins: {coins}
             </div>
             {settings.map!=="Practice"&&(()=>{
               const cm=parseFloat(((DIFF_COIN_MULT[settings.maze]||1)*(SPEED_COIN_MULT[settings.speed]||1)*(SKIN_COIN_MULT[settings.skin]||1)).toFixed(2));
               const cc=cm>1.01?"#ffdd44":cm<0.99?"#ff6666":"rgba(160,160,160,0.40)";
               return<div style={{fontSize:10,letterSpacing:1,color:cc,fontFamily:"Courier New",
-                marginTop:2,textShadow:`0 0 8px ${cc}88`}}>🪙 ×{cm.toFixed(2)} per run</div>;
+                marginTop:2,textShadow:`0 0 8px ${cc}88`}}>Coins x{cm.toFixed(2)} per run</div>;
             })()}
           </div>
 
           {/* ── Main page ──────────────────────────────────── */}
           {menuPage==="main"&&(
           <div key="main" style={{display:"flex",flexDirection:"column",alignItems:"center",
-            width:"min(640px,92vw)",
+            width:"min(600px,92vw)",maxHeight:"96vh",overflow:"hidden",
+            background:"rgba(0,4,20,0.82)",backdropFilter:"blur(12px)",
+            borderRadius:18,padding:"20px 28px",
+            border:"1px solid rgba(255,255,255,0.08)",
             animation:`${menuDirRef.current==="back"?"menuSlideLeft":"menuFadeIn"} 0.38s ease-out both`}}>
             <div style={{textAlign:"center",marginBottom:20,pointerEvents:"none"}}>
               <div style={{fontSize:"clamp(34px,6vw,56px)",fontWeight:"bold",color:curTheme.wall,
@@ -2533,10 +2678,10 @@ export default function SnakeBlast(): JSX.Element {
                 lineHeight:1.05,textShadow:`0 0 36px ${curSkin.a},0 0 72px ${curSkin.a}44`}}>BLAST</div>
             </div>
             <div style={{textAlign:"center",marginBottom:22,
-              background:"rgba(255,200,50,0.07)",border:"1px solid rgba(255,200,50,0.22)",
-              borderRadius:12,padding:"14px 36px",backdropFilter:"blur(8px)",
-              boxShadow:"0 0 30px rgba(255,180,0,0.10)",pointerEvents:"none"}}>
-              <div style={{fontSize:9,letterSpacing:4,color:"rgba(255,200,50,0.55)",
+              background:"rgba(255,200,50,0.13)",border:"1px solid rgba(255,200,50,0.35)",
+              borderRadius:12,padding:"14px 36px",
+              boxShadow:"0 0 30px rgba(255,180,0,0.15)",pointerEvents:"none"}}>
+              <div style={{fontSize:12,letterSpacing:4,color:"rgba(255,200,50,0.70)",
                 marginBottom:6,fontFamily:"Courier New"}}>
                 {bestHS?"BEST  SCORE  —  "+bestHS.label.toUpperCase():"BEST  SCORE"}
               </div>
@@ -2554,11 +2699,11 @@ export default function SnakeBlast(): JSX.Element {
                   <button key={pg} onClick={()=>{sndClick();menuDirRef.current="fwd";setMenuPage(pg);}}
                     onMouseEnter={e=>(e.currentTarget.style.background=`rgba(${rgb2},0.11)`)}
                     onMouseLeave={e=>(e.currentTarget.style.background=`rgba(${rgb2},0.04)`)}
-                    style={{background:`rgba(${rgb2},0.04)`,border:`1px solid rgba(${rgb2},0.30)`,
-                      color:c,padding:"14px 0",fontSize:12,fontFamily:"Courier New",cursor:"pointer",
+                    style={{background:`rgba(${rgb2},0.10)`,border:`1px solid rgba(${rgb2},0.40)`,
+                      color:c,padding:"16px 0",fontSize:15,fontFamily:"Courier New",cursor:"pointer",
                       letterSpacing:3,borderRadius:9,width:"100%",transition:"all 0.18s",
                       textShadow:`0 0 10px ${c}66`,boxShadow:`0 0 16px rgba(${rgb2},0.10)`}}>
-                    {i===0?"🐍  SNAKE  THEMES":i===1?"🗺  MAPS  &  MODE":"📖  HOW  TO  PLAY"}
+                    {i===0?"SNAKE  THEMES":i===1?"MAPS  &  MODE":"HOW  TO  PLAY"}
                   </button>
                 );
               })}
@@ -2573,9 +2718,12 @@ export default function SnakeBlast(): JSX.Element {
           {/* ── Skins page ─────────────────────────────────── */}
           {menuPage==="skins"&&(
           <div key="skins" style={{display:"flex",flexDirection:"column",alignItems:"center",
-            width:"min(580px,92vw)",
+            width:"min(580px,92vw)",maxHeight:"96vh",overflow:"hidden",
+            background:"rgba(0,4,20,0.82)",backdropFilter:"blur(12px)",
+            borderRadius:18,padding:"20px 28px",
+            border:"1px solid rgba(255,255,255,0.08)",
             animation:"menuSlideRight 0.38s ease-out both"}}>
-            <div style={{fontSize:10,letterSpacing:5,color:viewSkinDef.a,opacity:0.55,
+            <div style={{fontSize:14,letterSpacing:5,color:viewSkinDef.a,opacity:0.75,
               marginBottom:18,pointerEvents:"none"}}>SNAKE  THEMES</div>
             {arRow("SKIN",viewSkin,
               ()=>{const opts=Object.keys(SKINS);const i=opts.indexOf(viewSkin);sndClick();if(i>0)setViewSkin(opts[i-1]);},
@@ -2595,14 +2743,14 @@ export default function SnakeBlast(): JSX.Element {
                 </div>
               ))}
             </div>
-            {multBadge("🪙","coins",SKIN_COIN_MULT[viewSkin]||1,viewSkinDef.a)}
+            {multBadge("Coins","coins",SKIN_COIN_MULT[viewSkin]||1,viewSkinDef.a)}
             {itemStatusLine("skin",viewSkin,settings.skin,viewSkinDef.a,()=>setSettings(s=>({...s,skin:viewSkin})))}
             {arRow("SPEED",viewSpeed,
               ()=>{const opts=Object.keys(SPEEDS);sndClick();setViewSpeed(opts[Math.max(0,opts.indexOf(viewSpeed)-1)]);},
               ()=>{const opts=Object.keys(SPEEDS);const i=opts.indexOf(viewSpeed);sndClick();if(i<opts.length-1)setViewSpeed(opts[i+1]);},
               viewSkinDef.glow)}
-            {multBadge("🪙","coins",SPEED_COIN_MULT[viewSpeed]||1,viewSkinDef.glow)}
-            {multBadge("📊","score",SPEED_SCORE_MULT[viewSpeed]||1,"#88ccff")}
+            {multBadge("Coins","coins",SPEED_COIN_MULT[viewSpeed]||1,viewSkinDef.glow)}
+            {multBadge("S","score",SPEED_SCORE_MULT[viewSpeed]||1,"#88ccff")}
             {equipLine(viewSpeed,settings.speed,viewSkinDef.glow,()=>setSettings(s=>({...s,speed:viewSpeed})))}
             {combinedPanel(
               (DIFF_COIN_MULT[settings.maze]||1)*(SPEED_COIN_MULT[viewSpeed]||1)*(SKIN_COIN_MULT[viewSkin]||1),
@@ -2617,9 +2765,12 @@ export default function SnakeBlast(): JSX.Element {
           {/* ── Maps page ──────────────────────────────────── */}
           {menuPage==="maps"&&(
           <div key="maps" style={{display:"flex",flexDirection:"column",alignItems:"center",
-            width:"min(580px,92vw)",
+            width:"min(580px,92vw)",maxHeight:"96vh",overflow:"hidden",
+            background:"rgba(0,4,20,0.82)",backdropFilter:"blur(12px)",
+            borderRadius:18,padding:"20px 28px",
+            border:"1px solid rgba(255,255,255,0.08)",
             animation:"menuSlideRight 0.38s ease-out both"}}>
-            <div style={{fontSize:10,letterSpacing:5,color:viewDiffAccent,opacity:0.55,
+            <div style={{fontSize:14,letterSpacing:5,color:viewDiffAccent,opacity:0.75,
               marginBottom:18,pointerEvents:"none"}}>MAPS  &  MODE</div>
             {arRow("MAP",viewMap,
               ()=>{const opts=["Practice","Maze","Forest","Void"];sndClick();setViewMap(opts[Math.max(0,opts.indexOf(viewMap)-1)]);},
@@ -2627,7 +2778,7 @@ export default function SnakeBlast(): JSX.Element {
               isViewVoid?(vt?.shipCol||"#cc44ff"):isViewForest?"#44bb44":viewMap==="Practice"?"#00ff66":viewTheme.wall)}
             {viewMap==="Maze"&&!isUnlocked("map","Maze")
               ? <div style={{textAlign:"center",marginBottom:10}}>
-                  <div style={{fontSize:10,letterSpacing:2,color:"rgba(255,200,50,0.85)",marginBottom:7,fontFamily:"Courier New"}}>🔒  REACH  1000  SCORE  IN  PRACTICE</div>
+                  <div style={{fontSize:10,letterSpacing:2,color:"rgba(255,200,50,0.85)",marginBottom:7,fontFamily:"Courier New"}}>LOCKED - REACH  1000  SCORE  IN  PRACTICE</div>
                   <div style={{fontSize:9,color:"rgba(255,200,50,0.50)",fontFamily:"Courier New",letterSpacing:1}}>Play Practice until you score 1000 — then Maze unlocks free!</div>
                 </div>
               : itemStatusLine("map",viewMap,settings.map,isViewVoid?(vt?.shipCol||"#cc44ff"):isViewForest?"#44bb44":viewMap==="Practice"?"#00ff66":viewTheme.wall,()=>{
@@ -2639,13 +2790,13 @@ export default function SnakeBlast(): JSX.Element {
               ()=>{const opts=Object.keys(MAZE_SIZE_DEFS);sndClick();setViewMapSize(opts[Math.max(0,opts.indexOf(viewMapSize)-1)]);},
               ()=>{const opts=Object.keys(MAZE_SIZE_DEFS);const i=opts.indexOf(viewMapSize);sndClick();if(i<opts.length-1)setViewMapSize(opts[i+1]);},
               viewSizeAccent)}
-            {viewMap!=="Practice"&&multBadge("📊","score",SIZE_SCORE_MULT[viewMapSize]||1,viewSizeAccent)}
+            {viewMap!=="Practice"&&multBadge("S","score",SIZE_SCORE_MULT[viewMapSize]||1,viewSizeAccent)}
             {viewMap!=="Practice"&&itemStatusLine("mapsize",viewMapSize,settings.mapSize||"Small",viewSizeAccent,()=>setSettings(s=>({...s,mapSize:viewMapSize})))}
             {viewMap!=="Practice"&&arRow("DIFFICULTY",viewMaze,
               ()=>{const opts=Object.keys(MAZE_DIFF_DEFS);sndClick();setViewMaze(opts[Math.max(0,opts.indexOf(viewMaze)-1)]);},
               ()=>{const opts=Object.keys(MAZE_DIFF_DEFS);const i=opts.indexOf(viewMaze);sndClick();if(i<opts.length-1)setViewMaze(opts[i+1]);},
               viewDiffAccent)}
-            {viewMap!=="Practice"&&multBadge("🪙","coins",DIFF_COIN_MULT[viewMaze]||1,viewDiffAccent)}
+            {viewMap!=="Practice"&&multBadge("Coins","coins",DIFF_COIN_MULT[viewMaze]||1,viewDiffAccent)}
             {viewMap!=="Practice"&&equipLine(viewMaze,settings.maze,viewDiffAccent,()=>setSettings(s=>({...s,maze:viewMaze})))}
             {viewMap==="Practice"
               ? <div style={{textAlign:"center",marginBottom:6,fontSize:9,color:"rgba(0,255,102,0.50)",fontFamily:"Courier New",letterSpacing:2}}>FREE  STARTER  MAP  ·  NO  COINS  EARNED</div>
@@ -2680,9 +2831,9 @@ export default function SnakeBlast(): JSX.Element {
                 :`linear-gradient(to right,${viewTheme.bg},${viewTheme.wall} 55%,${viewTheme.floor})`
             }}/>}
             <div style={{textAlign:"center",marginBottom:14,pointerEvents:"none"}}>
-              <div style={{fontSize:9,letterSpacing:3,color:"rgba(255,200,50,0.50)",
+              <div style={{fontSize:12,letterSpacing:3,color:"rgba(255,200,50,0.65)",
                 fontFamily:"Courier New",marginBottom:2}}>HIGH  SCORE</div>
-              <div style={{fontSize:20,fontWeight:"bold",fontFamily:"Courier New",
+              <div style={{fontSize:26,fontWeight:"bold",fontFamily:"Courier New",
                 color:viewHighScore>0?"#ffdd44":"rgba(255,200,50,0.22)",
                 textShadow:viewHighScore>0?"0 0 18px #ffcc0077":"none"}}>
                 {viewHighScore>0?viewHighScore:"—"}
@@ -2700,39 +2851,43 @@ export default function SnakeBlast(): JSX.Element {
 
           {/* ── Info page ──────────────────────────────────── */}
           {menuPage==="info"&&(
-          <div key="info" style={{display:"flex",flexDirection:"column",alignItems:"center",
-            animation:"menuSlideRight 0.38s ease-out both",width:"min(900px,95vw)"}}>
-            <div style={{fontSize:10,letterSpacing:5,color:"#88ccff",opacity:0.65,
+          <div key="info" data-noscroll style={{display:"flex",flexDirection:"column",alignItems:"center",
+            animation:"menuSlideRight 0.38s ease-out both",width:"min(900px,95vw)",
+            maxHeight:"96vh",overflowY:"auto",scrollbarWidth:"none",
+            background:"rgba(0,4,20,0.82)",backdropFilter:"blur(12px)",
+            borderRadius:18,padding:"20px 28px",
+            border:"1px solid rgba(255,255,255,0.08)"}}>
+            <div style={{fontSize:14,letterSpacing:5,color:"#88ccff",opacity:0.80,
               marginBottom:18,pointerEvents:"none",flexShrink:0}}>HOW  TO  PLAY</div>
 
             {/* Section helper */}
             {(()=>{
               const S=(title:string,col:string,children:React.ReactNode)=>(
                 <div style={{marginBottom:10,
-                  background:`rgba(${hexRgb(col)},0.06)`,
-                  border:`1px solid rgba(${hexRgb(col)},0.22)`,
-                  borderRadius:10,padding:"10px 14px"}}>
-                  <div style={{fontSize:9,letterSpacing:4,color:col,marginBottom:8,
-                    fontFamily:"Courier New",opacity:0.80}}>{title}</div>
+                  background:`rgba(${hexRgb(col)},0.10)`,
+                  border:`1px solid rgba(${hexRgb(col)},0.32)`,
+                  borderRadius:10,padding:"12px 16px"}}>
+                  <div style={{fontSize:12,letterSpacing:4,color:col,marginBottom:8,
+                    fontFamily:"Courier New",opacity:0.90}}>{title}</div>
                   {children}
                 </div>
               );
               const Row=(icon:string,name:string,desc:string,col:string)=>(
-                <div style={{display:"flex",alignItems:"flex-start",gap:8,marginBottom:7}}>
-                  <div style={{fontSize:15,lineHeight:1,flexShrink:0,width:20,textAlign:"center"}}>{icon}</div>
+                <div style={{display:"flex",alignItems:"flex-start",gap:8,marginBottom:8}}>
+                  <div style={{fontSize:16,lineHeight:1,flexShrink:0,width:22,textAlign:"center"}}>{icon}</div>
                   <div>
-                    <div style={{fontSize:10,fontWeight:"bold",color:col,fontFamily:"Courier New",
-                      letterSpacing:1,marginBottom:1}}>{name}</div>
-                    <div style={{fontSize:9,color:"rgba(200,220,255,0.55)",fontFamily:"Courier New",
-                      lineHeight:1.4}}>{desc}</div>
+                    <div style={{fontSize:13,fontWeight:"bold",color:col,fontFamily:"Courier New",
+                      letterSpacing:1,marginBottom:2}}>{name}</div>
+                    <div style={{fontSize:11,color:"rgba(200,220,255,0.70)",fontFamily:"Courier New",
+                      lineHeight:1.45}}>{desc}</div>
                   </div>
                 </div>
               );
               const Stat=(label:string,val:string,col:string)=>(
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",
-                  marginBottom:5,borderBottom:"1px solid rgba(255,255,255,0.05)",paddingBottom:4}}>
-                  <div style={{fontSize:9,color:"rgba(200,220,255,0.50)",fontFamily:"Courier New"}}>{label}</div>
-                  <div style={{fontSize:10,fontWeight:"bold",color:col,fontFamily:"Courier New",
+                  marginBottom:6,borderBottom:"1px solid rgba(255,255,255,0.07)",paddingBottom:5}}>
+                  <div style={{fontSize:12,color:"rgba(200,220,255,0.65)",fontFamily:"Courier New"}}>{label}</div>
+                  <div style={{fontSize:13,fontWeight:"bold",color:col,fontFamily:"Courier New",
                     textShadow:`0 0 8px ${col}88`}}>{val}</div>
                 </div>
               );
@@ -2740,15 +2895,15 @@ export default function SnakeBlast(): JSX.Element {
                 <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,width:"100%",marginBottom:10}}>
                   <div style={{display:"flex",flexDirection:"column"}}>
                     {S("BASICS","#00ffcc",<>
-                      {Row("🐍","STEER","WASD or arrow keys. On phone: swipe or use the d-pad.","#00ffcc")}
-                      {Row("🍎","EAT  FRUIT","Your snake grows. Rarer fruit = more points. Eat fast to chain a combo!","#ffdd44")}
-                      {Row("🔲","FILL  SHAPES","Cover every glowing tile with your body. They explode for bonus points — your snake reconnects.","#cc88ff")}
-                      {Row("💀","DEATH","Touch a wall = red flash. Bite yourself = purple flash. Ghost lets you pass through yourself.","#ff4444")}
-                      {Row("🟢","PRACTICE  MAP","Free starter map. Open arena, no coins. Score 1000 to unlock Maze and start earning coins!","#00ff66")}
-                      {Row("🚀","VOID  MAP","Open space! Dodge moving spaceships — they can't fly through your body. Touch a ship = death.","#cc88ff")}
+                      {Row(">","STEER","WASD or arrow keys. On phone: swipe or use the d-pad.","#00ffcc")}
+                      {Row("o","EAT  FRUIT","Your snake grows. Rarer fruit = more points. Eat fast to chain a combo!","#ffdd44")}
+                      {Row("[]","FILL  SHAPES","Cover every glowing tile with your body. They explode for bonus points — your snake reconnects.","#cc88ff")}
+                      {Row("X","DEATH","Touch a wall = red flash. Bite yourself = purple flash. Ghost lets you pass through yourself.","#ff4444")}
+                      {Row("*","PRACTICE  MAP","Free starter map. Open arena, no coins. Score 1000 to unlock Maze and start earning coins!","#00ff66")}
+                      {Row(">>","VOID  MAP","Open space! Dodge moving spaceships — they can't fly through your body. Touch a ship = death.","#cc88ff")}
                     </>)}
                     {S("COMBO","#ff88cc",<>
-                      {Row("🔗","CHAIN","Eat fruits one after another before the timer runs out.","#ff88cc")}
+                      {Row("-","CHAIN","Eat fruits one after another before the timer runs out.","#ff88cc")}
                       {Stat("Combo  ×2","√2  ≈  1.4×  pts","#ff88cc")}
                       {Stat("Combo  ×4","√4  =  2×  pts","#ff44cc")}
                       {Stat("Combo  ×9","√9  =  3×  pts","#ff00cc")}
@@ -2758,7 +2913,7 @@ export default function SnakeBlast(): JSX.Element {
                       </div>
                     </>)}
                     {S("COINS","#ffdd44",<>
-                      {Row("🪙","EARN","Coins = score ÷ 50 × multipliers. Spend in shop to unlock skins, maps, themes.","#ffdd44")}
+                      {Row("$","EARN","Coins = score ÷ 50 × multipliers. Spend in shop to unlock skins, maps, themes.","#ffdd44")}
                       {Stat("Hard  diff","× 1.8  coins","#ff4422")}
                       {Stat("Fast  speed","× 1.6  coins","#ff8844")}
                       {Stat("Cosmic  skin","× 1.5  coins","#cc44ff")}
@@ -2769,19 +2924,19 @@ export default function SnakeBlast(): JSX.Element {
                   </div>
                   <div style={{display:"flex",flexDirection:"column"}}>
                     {S("FRUITS","#ffdd44",<>
-                      {Stat("🟡  Common","+ 6  pts","#ffdd44")}
-                      {Stat("🟢  Uncommon","+ 16  pts","#00ffaa")}
-                      {Stat("🔵  Rare","+ 38  pts","#88aaff")}
-                      {Stat("🌟  Epic","+ 75  pts","#ffbb00")}
+                      {Stat("Common","+ 6  pts","#ffdd44")}
+                      {Stat("Uncommon","+ 16  pts","#00ffaa")}
+                      {Stat("Rare","+ 38  pts","#88aaff")}
+                      {Stat("Epic","+ 75  pts","#ffbb00")}
                       <div style={{fontSize:9,color:"rgba(200,220,255,0.40)",fontFamily:"Courier New",marginTop:3,lineHeight:1.4}}>
                         Better themes make rarer fruits appear more often.
                       </div>
                     </>)}
                     {S("POWERUP  FRUITS","#bbbbff",<>
-                      {Row("⚡","RUSH  +30","Moves faster for 5 s.","#ffee44")}
-                      {Row("❄","CHILL  +30","Moves slower for 6 s — easier to turn.","#88ddff")}
-                      {Row("✦","GHOST  +50","Pass through your own body for 7 s.","#bbbbff")}
-                      {Row("★","DOUBLE  +75","All score ×2 for 8 s.","#ffdd00")}
+                      {Row("!!","RUSH  +30","Moves faster for 5 s.","#ffee44")}
+                      {Row("~~","CHILL  +30","Moves slower for 6 s — easier to turn.","#88ddff")}
+                      {Row("++","GHOST  +50","Pass through your own body for 7 s.","#bbbbff")}
+                      {Row("x2","DOUBLE  +75","All score ×2 for 8 s.","#ffdd00")}
                       <div style={{fontSize:9,color:"rgba(200,220,255,0.40)",fontFamily:"Courier New",marginTop:3,lineHeight:1.4}}>
                         One powerup spawns every ~10 s when none are on the map. Better themes = higher chance.
                       </div>
@@ -2795,11 +2950,11 @@ export default function SnakeBlast(): JSX.Element {
                       </div>
                     </>)}
                     {S("THEMES  &  TIERS","#88ccff",<>
-                      {Row("⚫","Tier 0  —  Mono / Pine","Rush powerup only. Rare chance.","#aaaaaa")}
-                      {Row("🔵","Tier 1  —  Neon / Swamp","Rush & Chill powerups.","#44ffcc")}
-                      {Row("❄","Tier 2  —  Arctic / Autumn","Adds Ghost powerup.","#88ddff")}
-                      {Row("🔴","Tier 3  —  Magma / Cherry","Adds Double Score.","#ff8844")}
-                      {Row("🌌","Tier 4  —  Space / Winter","All powerups. Rarest fruits.","#cc88ff")}
+                      {Row("0","Tier 0  —  Mono / Pine","Rush powerup only. Rare chance.","#aaaaaa")}
+                      {Row("1","Tier 1  —  Neon / Swamp","Rush & Chill powerups.","#44ffcc")}
+                      {Row("2","Tier 2  —  Arctic / Autumn","Adds Ghost powerup.","#88ddff")}
+                      {Row("3","Tier 3  —  Magma / Cherry","Adds Double Score.","#ff8844")}
+                      {Row("4","Tier 4  —  Space / Winter","All powerups. Rarest fruits.","#cc88ff")}
                     </>)}
                   </div>
                 </div>
@@ -2822,7 +2977,7 @@ export default function SnakeBlast(): JSX.Element {
               background:"rgba(0,255,102,0.10)",border:"1px solid rgba(0,255,102,0.40)",
               borderRadius:10,padding:"10px 24px"}}>
               <div style={{fontSize:10,letterSpacing:3,color:"rgba(0,255,102,0.65)",
-                fontFamily:"Courier New",marginBottom:4}}>🎉  MAZE  UNLOCKED!</div>
+                fontFamily:"Courier New",marginBottom:4}}>MAZE  UNLOCKED!</div>
               <div style={{fontSize:12,color:"#00ff66",fontFamily:"Courier New",letterSpacing:1,
                 textShadow:"0 0 16px rgba(0,255,102,0.70)"}}>You scored 1000!  Maze is now free.</div>
             </div>
@@ -2833,7 +2988,7 @@ export default function SnakeBlast(): JSX.Element {
                 fontFamily:"Courier New",marginBottom:2}}>COINS  EARNED</div>
               <div style={{fontSize:22,fontWeight:"bold",color:"#ffdd44",fontFamily:"Courier New",
                 letterSpacing:2,textShadow:"0 0 20px rgba(255,180,0,0.70)"}}>
-                +{coinsEarnedRef.current}  🪙
+                +{coinsEarnedRef.current}  coins
               </div>
             </div>
           )}
@@ -2873,6 +3028,26 @@ export default function SnakeBlast(): JSX.Element {
           <button onPointerDown={()=>dpad({x:0,y: 1})} style={{...dBtn,position:"absolute",bottom:2, right:49}}>▼</button>
           <button onPointerDown={()=>dpad({x:-1,y:0})} style={{...dBtn,position:"absolute",bottom:49,right:98}}>◄</button>
           <button onPointerDown={()=>dpad({x: 1,y:0})} style={{...dBtn,position:"absolute",bottom:49,right:0}}>►</button>
+        </div>
+      )}
+      {showIntro&&screen==="playing"&&(
+        <div
+          onClick={()=>setShowIntro(false)}
+          onKeyDown={()=>setShowIntro(false)}
+          tabIndex={0}
+          style={{position:"absolute",inset:0,zIndex:50,background:"rgba(0,0,0,0.82)",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:16,cursor:"pointer"}}
+        >
+          <div style={{color:"#00ff88",fontFamily:"'Courier New',monospace",fontSize:26,fontWeight:"bold",letterSpacing:2,marginBottom:8}}>SNAKEBLAST</div>
+          <div style={{color:"#aaffcc",fontFamily:"'Courier New',monospace",fontSize:14,maxWidth:320,textAlign:"center",lineHeight:1.8}}>
+            <div>Move with arrow keys or WASD</div>
+            <div>Eat fruit to grow your snake</div>
+            <div>Surround shape outlines to blast them</div>
+            <div>Collect powerups for special abilities</div>
+          </div>
+          <div style={{color:"#00ff66",fontFamily:"'Courier New',monospace",fontSize:13,background:"rgba(0,255,100,0.10)",border:"1px solid #00ff66",borderRadius:8,padding:"8px 18px",marginTop:8}}>
+            Get 1000 score on Practice to unlock new maps!
+          </div>
+          <div style={{color:"#558866",fontFamily:"'Courier New',monospace",fontSize:12,marginTop:16,animation:"blink 1.2s step-end infinite"}}>CLICK OR PRESS ANY KEY TO START</div>
         </div>
       )}
     </div>
