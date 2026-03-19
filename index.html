@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SnakeBlast</title>
+    <style>
+      #rotate-msg { display:none; position:fixed; inset:0; z-index:9999;
+        background:#000; color:#00ff88; font-family:'Courier New',monospace;
+        font-size:18px; text-align:center; align-items:center;
+        justify-content:center; flex-direction:column; gap:16px; }
+      @media screen and (orientation:portrait) and (max-width:900px) {
+        #rotate-msg { display:flex; }
+        #root { display:none; }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="rotate-msg">
+      <div style="font-size:48px">&#8635;</div>
+      <div>Please rotate your device to landscape</div>
+    </div>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
