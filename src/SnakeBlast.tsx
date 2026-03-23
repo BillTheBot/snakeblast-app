@@ -126,39 +126,12 @@ interface Particle {
   size: number;
 }
 
-interface Ship {
-  x: number; y: number;   // pixel position (center)
-  vx: number; vy: number; // velocity px/s
-  r: number;              // radius px
-  type: number;           // 0=fighter, 1=cruiser, 2=destroyer, 3=dreadnought
-  angle: number;          // facing angle (rad)
-}
-
-interface VoidThemeDef {
-  bg: string;
-  shipCol: string;
-  shipGlow: string;
-  engineCol: string;
-  barrierCol: string;
-}
-
 interface ThemeDef {
   bg: string;
   floor: string;
   grid: string;
   wall: string;
   wallStroke: string;
-}
-
-interface ForestThemeDef {
-  bg: string;
-  floor: string;
-  grid: string;
-  treeGround: string;
-  trunk: string;
-  canopy1: string;
-  canopy2: string;
-  canopy3: string;
 }
 
 interface GameSettings {
@@ -174,9 +147,7 @@ interface UnlockStore {
   skins: string[];
   mazethemes: string[];
   maps: string[];
-  forestthemes: string[];
   mapsizes: string[];
-  voidthemes: string[];
 }
 
 interface GameState {
@@ -207,7 +178,6 @@ interface GameState {
   reconnect: Reconnect | null;
   wt: number;
   mapType: string;
-  forestTheme?: ForestThemeDef;
   powerups: PowerupEffect[];
   baseTickDur: number;
   fruitTarget: number;
@@ -216,8 +186,8 @@ interface GameState {
   tier: number;
   scoreMult: number;
   deathCause: "wall" | "body" | "ship" | null;
-  ships: Ship[];
-  voidTheme?: VoidThemeDef;
+  snakeSet: Set<string>;  // maintained incrementally — avoids full rebuild every tick
+  nonPwFruitCount: number; // cached count of non-powerup fruits
 }
 
 type ScreenState = "menu" | "playing" | "paused" | "dying" | "gameover";
@@ -230,25 +200,15 @@ const WALL     = 1;
 // Map size — controls physical dimensions (purchasable).
 // targetWt values are 70k+1 so they divide evenly by every cell size (5,7,10).
 const MAZE_SIZE_DEFS: Record<string,{targetWt:number}> = {
-  Small:  {targetWt:71 },   // 71 tiles × 40px = 2840px
-  Medium: {targetWt:141},   // 141 tiles × 40px = 5640px
-  Large:  {targetWt:211},   // 211 tiles × 40px = 8440px
-};
-const FOREST_SIZE_DEFS: Record<string,{wt:number}> = {
-  Small:  {wt:70 },
-  Medium: {wt:150},
-  Large:  {wt:220},
+  Small:  {targetWt:41 },   // 41 tiles × 40px = 1640px
+  Medium: {targetWt:71 },   // 71 tiles × 40px = 2840px
+  Large:  {targetWt:101},   // 101 tiles × 40px = 4040px
 };
 // Difficulty — controls corridor width / tree density only, not physical size
 const MAZE_DIFF_DEFS: Record<string,{pass:number,dep:number}> = {
   Easy:   {pass:9, dep:8},
   Normal: {pass:6, dep:5},
   Hard:   {pass:4, dep:2},
-};
-const FOREST_DIFF_DEFS: Record<string,{density:number,cluster:number,clearR:number,ringW:number,ringDensity:number}> = {
-  Easy:   {density:0.055, cluster:6, clearR:10, ringW:14, ringDensity:0.055},
-  Normal: {density:0.085, cluster:5, clearR:8,  ringW:16, ringDensity:0.090},
-  Hard:   {density:0.120, cluster:4, clearR:5,  ringW:18, ringDensity:0.130},
 };
 const mazeDims=(sizeKey:string,diffKey:string)=>{
   const s=MAZE_SIZE_DEFS[sizeKey]||MAZE_SIZE_DEFS.Small;
@@ -260,7 +220,7 @@ const mazeDims=(sizeKey:string,diffKey:string)=>{
 };
 const COMBO_DUR   = 5000;
 // Shape target scales with map size so larger maps feel dense with targets
-const shapeTargetFor = (wt: number): number => wt <= 80 ? 8 : wt <= 150 ? 14 : 22;
+const shapeTargetFor = (wt: number): number => wt <= 50 ? 4 : wt <= 80 ? 6 : 10;
 const CULL_MARGIN = 32; // tiles beyond screen before items are removed
 // Neighbour directions used when drawing shape outlines (dx,dy,ax,ay,bx,by offsets are applied per-tile)
 const SHAPE_EDGE_DIRS = [[0,-1,0,0,1,0],[0,1,0,1,1,1],[-1,0,0,0,0,1],[1,0,1,0,1,1]] as const;
@@ -284,24 +244,28 @@ const rndFruitType=(tier: number=0):number=>{
 interface PowerupDef {id:string;icon:string;col:string;glow:string;dur:number;score:number;}
 const POWERUP_DEFS: PowerupDef[]=[
   {id:"rush",  icon:"!!",col:"#ffee44",glow:"#ffcc00",dur:5000,score:30 },
-  {id:"chill", icon:"~~", col:"#88ddff",glow:"#44aaff",dur:6000,score:30 },
-  {id:"ghost", icon:"++", col:"#bbbbff",glow:"#6666ff",dur:7000,score:50 },
-  {id:"double",icon:"x2", col:"#ffdd00",glow:"#ffaa00",dur:8000,score:75 },
+  {id:"chill", icon:"~~",col:"#88ddff",glow:"#44aaff",dur:6000,score:30 },
+  {id:"ghost", icon:"++",col:"#bbbbff",glow:"#6666ff",dur:7000,score:50 },
+  {id:"double",icon:"x2",col:"#ffdd00",glow:"#ffaa00",dur:8000,score:75 },
+  {id:"phase", icon:"[]",col:"#00ffee",glow:"#00cccc",dur:7000,score:60 },
 ];
-// Chance (0–1) of a powerup spawning every 10 s when none are on the map, per tier
-const POWERUP_SPAWN_CHANCE=[0.20,0.35,0.50,0.70,0.90];
+// Chance (0–1) of a powerup spawning per interval, per tier
+const POWERUP_SPAWN_CHANCE=[0.20,0.35,0.50,0.75,0.95];
+// Spawn interval (ms) per tier — better themes spawn powerups more often
+const POWERUP_SPAWN_INTERVAL=[14000,11000,8000,5500,3500];
 // Which powerup types unlock at each tier (cumulative)
 const POWERUP_BY_TIER: string[][]=[
-  ["rush"],                          // tier 0: only rush
-  ["rush","chill"],                  // tier 1: +chill
-  ["rush","chill","ghost"],          // tier 2: +ghost
-  ["rush","chill","ghost","double"], // tier 3: +double
-  ["rush","chill","ghost","double"], // tier 4: all
+  ["rush"],                                 // tier 0: only rush
+  ["rush","chill"],                         // tier 1: +chill
+  ["rush","chill","ghost"],                 // tier 2: +ghost
+  ["rush","chill","ghost","double","phase"],// tier 3: +double +phase
+  ["rush","chill","ghost","double","phase"],// tier 4: all
 ];
-// Theme quality tier: 0 (worst) → 4 (best)
+/// Theme quality tier: 0 (worst) → 4 (best)
 const THEME_TIER: Record<string,number>={
-  Mono:0,Pine:0, Neon:1,Swamp:1, Arctic:2,Autumn:2, Magma:3,Cherry:3, Space:4,Winter:4,
-  Nebula:2, Aurora:3, Solar:3, Pulsar:4, Practice:0,
+  Mono:0, Neon:1, Toxic:1, Arctic:2, Crimson:2, Gold:3, Magma:3, Teal:4, Rose:4, Space:4, Shadow:4,
+  Abyss:4, Inferno:4, Nebula:4, Obsidian:4, Aurora:4, Prism:4, Eclipse:4, Phantom:4,
+  Practice:0,
 };
 // Practice map border-wall style (green arena)
 const PRACTICE_BARRIER_COL="#00ff66";
@@ -314,27 +278,12 @@ const rndPowerup=(tier: number):string=>{
 const SPEEDS: Record<string, number> = { Slow: 200, Normal: 140, Fast: 88, Insane: 48 };
 
 // ── Shop prices (0 = free/default) ────────────────────────────────────────────
-const SKIN_PRICES:         Record<string,number> = {Mono:0,   Neon:120,  Arctic:280, Magma:520,  Cosmic:840 };
-const MAZETHEME_PRICES:    Record<string,number> = {Mono:0,   Neon:160,  Arctic:320, Magma:560,  Space:900  };
-const MAP_PRICES:          Record<string,number> = {Practice:0, Maze:0, Forest:600, Void:900};
+const SKIN_PRICES:         Record<string,number> = {Mono:0, Neon:150, Arctic:350, Magma:650, Cosmic:1050, Venom:1600, Ember:2300, Frost:3200, Ghost:4400, Plasma:6000};
+const MAZETHEME_PRICES:    Record<string,number> = {Mono:0, Neon:150, Toxic:280, Arctic:450, Crimson:700, Gold:1000, Magma:1400, Teal:1900, Rose:2600, Space:3500, Shadow:4800, Abyss:6500, Inferno:9000, Nebula:12500, Obsidian:17000, Aurora:23000, Prism:31000, Eclipse:42000, Phantom:58000};
+const MAP_PRICES:          Record<string,number> = {Practice:0, Maze:0};
 const MAPSIZE_PRICES:      Record<string,number> = {Small:0,  Medium:400, Large:800 };
-const FORESTTHEME_PRICES:  Record<string,number> = {Pine:0,   Swamp:240, Autumn:360, Cherry:680, Winter:1100};
-const VOID_DIFF_DEFS: Record<string,{count:number,speed:number,minR:number,maxR:number}> = {
-  Easy:   {count:18, speed:75,  minR:14, maxR:36},
-  Normal: {count:32, speed:120, minR:16, maxR:46},
-  Hard:   {count:48, speed:180, minR:22, maxR:80},
-};
-// Ship count multiplier by map size (bigger map = way more ships)
-const VOID_SIZE_MULT: Record<string,number> = {Small:1.0, Medium:2.8, Large:5.0};
-const VOID_THEMES: Record<string,VoidThemeDef> = {
-  Nebula: {bg:"#06001a",shipCol:"#cc44ff",shipGlow:"#8800ff",engineCol:"#ff44ff",barrierCol:"#aa00ff"},
-  Aurora: {bg:"#001a0a",shipCol:"#00ff88",shipGlow:"#00aa44",engineCol:"#44ffcc",barrierCol:"#00ffaa"},
-  Solar:  {bg:"#1a0400",shipCol:"#ff8800",shipGlow:"#cc4400",engineCol:"#ffff44",barrierCol:"#ff6600"},
-  Pulsar: {bg:"#000d1a",shipCol:"#4488ff",shipGlow:"#0044cc",engineCol:"#44ffff",barrierCol:"#0088ff"},
-};
-const VOIDTHEME_PRICES: Record<string,number> = {Nebula:0, Aurora:280, Solar:560, Pulsar:900};
 const DIFF_COIN_MULT:      Record<string,number> = {Easy:0.7, Normal:1.0, Hard:1.8  };
-const SKIN_COIN_MULT:      Record<string,number> = {Mono:1.0, Neon:1.1, Arctic:1.2, Magma:1.35, Cosmic:1.5};
+const SKIN_COIN_MULT:      Record<string,number> = {Mono:1.0, Neon:1.1, Arctic:1.2, Magma:1.35, Cosmic:1.5, Venom:1.7, Ember:1.9, Frost:2.15, Ghost:2.45, Plasma:2.8};
 const SPEED_SCORE_MULT:    Record<string,number> = {Slow:0.8, Normal:1.0, Fast:1.4, Insane:2.0};
 const SIZE_SCORE_MULT:     Record<string,number> = {Small:1.0,Medium:1.2, Large:1.5 };
 const SPEED_COIN_MULT:     Record<string,number> = {Slow:0.6, Normal:1.0, Fast:1.6, Insane:2.4};
@@ -345,23 +294,35 @@ const SKINS: Record<string, SkinDef> = {
   Arctic: { head:"#eef8ff", a:"#88ddff", b:"#1166ee", glow:"#44aaff" },
   Magma:  { head:"#fff6e0", a:"#ffcc00", b:"#ff2200", glow:"#ff6600" },
   Cosmic: { head:"#f0e0ff", a:"#cc44ff", b:"#3300cc", glow:"#9900ff" },
+  Venom:  { head:"#eaffcc", a:"#66ff22", b:"#004400", glow:"#44ff00" },
+  Ember:  { head:"#fff8f0", a:"#ff8822", b:"#cc1100", glow:"#ff4400" },
+  Frost:  { head:"#f0faff", a:"#aaeeff", b:"#004488", glow:"#88ddff" },
+  Ghost:  { head:"#f8f8ff", a:"#ccccdd", b:"#444466", glow:"#bbbbee" },
+  Plasma: { head:"#fffce0", a:"#ffee00", b:"#ff00cc", glow:"#ff88ff" },
 };
 
 const THEMES: Record<string, ThemeDef> = {
-  "Mono":   { bg:"#0a0a0a", floor:"#181818", grid:"rgba(255,255,255,0.10)", wall:"#e8e8e8", wallStroke:"rgba(0,0,0,0.82)"     },
-  "Neon":   { bg:"#04020f", floor:"#080520", grid:"rgba(0,255,180,0.28)",   wall:"#d0ccff", wallStroke:"rgba(100,0,220,0.78)"  },
-  "Arctic": { bg:"#060c18", floor:"#0d2444", grid:"rgba(70,160,255,0.30)",  wall:"#cce4f8", wallStroke:"rgba(20,80,160,0.68)"  },
-  "Magma":  { bg:"#0d0100", floor:"#2a0e00", grid:"rgba(210,70,10,0.28)",   wall:"#f0d0a8", wallStroke:"rgba(160,40,0,0.78)"   },
-  "Space":  { bg:"#040810", floor:"#0e1e3a", grid:"rgba(40,110,255,0.28)",  wall:"#c8d4f0", wallStroke:"rgba(0,40,150,0.72)"   },
+  "Mono":    { bg:"#0a0a0a", floor:"#181818", grid:"rgba(255,255,255,0.10)", wall:"#e8e8e8", wallStroke:"rgba(0,0,0,0.82)"      },
+  "Neon":    { bg:"#04020f", floor:"#080520", grid:"rgba(0,255,180,0.28)",   wall:"#d0ccff", wallStroke:"rgba(100,0,220,0.78)"   },
+  "Toxic":   { bg:"#010a00", floor:"#061400", grid:"rgba(50,200,0,0.28)",    wall:"#aaff44", wallStroke:"rgba(40,160,0,0.78)"    },
+  "Arctic":  { bg:"#060c18", floor:"#0d2444", grid:"rgba(70,160,255,0.30)",  wall:"#cce4f8", wallStroke:"rgba(20,80,160,0.68)"   },
+  "Crimson": { bg:"#0a0000", floor:"#1a0000", grid:"rgba(200,20,20,0.28)",   wall:"#ff8888", wallStroke:"rgba(180,0,0,0.78)"     },
+  "Gold":    { bg:"#080500", floor:"#180e00", grid:"rgba(200,150,0,0.28)",   wall:"#ffee88", wallStroke:"rgba(180,120,0,0.78)"   },
+  "Magma":   { bg:"#0d0100", floor:"#2a0e00", grid:"rgba(210,70,10,0.28)",   wall:"#f0d0a8", wallStroke:"rgba(160,40,0,0.78)"    },
+  "Teal":    { bg:"#000a0a", floor:"#001818", grid:"rgba(0,200,180,0.28)",   wall:"#88ffee", wallStroke:"rgba(0,140,130,0.72)"   },
+  "Rose":    { bg:"#0a0006", floor:"#180010", grid:"rgba(220,50,140,0.28)",  wall:"#ffaadd", wallStroke:"rgba(180,20,100,0.78)"  },
+  "Space":   { bg:"#040810", floor:"#0e1e3a", grid:"rgba(40,110,255,0.28)",  wall:"#c8d4f0", wallStroke:"rgba(0,40,150,0.72)"    },
+  "Shadow":  { bg:"#050008", floor:"#0d0016", grid:"rgba(100,20,200,0.28)",  wall:"#cc88ff", wallStroke:"rgba(80,0,180,0.78)"    },
+  "Abyss":   { bg:"#00080f", floor:"#001522", grid:"rgba(0,180,220,0.28)",   wall:"#44ccee", wallStroke:"rgba(0,100,160,0.78)"   },
+  "Inferno": { bg:"#120000", floor:"#240500", grid:"rgba(255,120,0,0.30)",   wall:"#ffaa44", wallStroke:"rgba(200,60,0,0.80)"    },
+  "Nebula":  { bg:"#070010", floor:"#10002a", grid:"rgba(200,0,220,0.28)",   wall:"#ff88ee", wallStroke:"rgba(160,0,180,0.78)"   },
+  "Obsidian":{ bg:"#060607", floor:"#0e0f10", grid:"rgba(180,190,200,0.22)", wall:"#c4ccd4", wallStroke:"rgba(60,70,80,0.85)"    },
+  "Aurora":  { bg:"#020a10", floor:"#040f1c", grid:"rgba(0,220,160,0.30)",   wall:"#44ffcc", wallStroke:"rgba(0,140,110,0.75)"   },
+  "Prism":   { bg:"#040404", floor:"#0a0a0c", grid:"rgba(255,255,255,0.18)", wall:"#ffffff", wallStroke:"rgba(180,180,255,0.70)"  },
+  "Eclipse": { bg:"#080002", floor:"#140004", grid:"rgba(255,100,0,0.28)",   wall:"#ff7722", wallStroke:"rgba(140,30,0,0.82)"    },
+  "Phantom": { bg:"#060610", floor:"#0c0c1c", grid:"rgba(160,160,255,0.22)", wall:"#ddddff", wallStroke:"rgba(80,80,180,0.68)"   },
 };
 
-const FOREST_THEMES: Record<string, ForestThemeDef> = {
-  Pine:   { bg:"#030d02", floor:"#0d1a09", grid:"rgba(20,60,10,0.22)",    treeGround:"#0a1407", trunk:"#5a3010", canopy1:"#1a4010", canopy2:"#256818", canopy3:"#3a8822" },
-  Autumn: { bg:"#0d0500", floor:"#1c0c02", grid:"rgba(140,60,0,0.25)",    treeGround:"#0e0600", trunk:"#4a2200", canopy1:"#8c3200", canopy2:"#c85500", canopy3:"#e87a10" },
-  Swamp:  { bg:"#010804", floor:"#091208", grid:"rgba(20,70,30,0.20)",    treeGround:"#050b04", trunk:"#2a2810", canopy1:"#0c2a12", canopy2:"#184a1e", canopy3:"#256830" },
-  Cherry: { bg:"#0a0208", floor:"#160610", grid:"rgba(180,40,100,0.22)",  treeGround:"#0a0208", trunk:"#5a2838", canopy1:"#881040", canopy2:"#c42868", canopy3:"#ff6aaa" },
-  Winter: { bg:"#020408", floor:"#0a1020", grid:"rgba(140,190,255,0.22)", treeGround:"#060c18", trunk:"#5a5a70", canopy1:"#b8cce0", canopy2:"#ddeeff", canopy3:"#f0f8ff" },
-};
 
 const SHAPE_DEFS: ShapeDef[] = [
   { pts:[[0,0],[1,0],[0,1],[1,1]],              b:80  },
@@ -384,7 +345,12 @@ const SHAPE_DEFS: ShapeDef[] = [
 // ═══════════════════════════════════════════════════════════════════════════════
 const lerp    = (a: number, b: number, t: number): number => a + (b - a) * t;
 const clamp   = (v: number, lo: number, hi: number): number => Math.max(lo, Math.min(hi, v));
-const hRgb    = (h: string): [number, number, number] => [parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)];
+const _hRgbCache = new Map<string,[number,number,number]>();
+const hRgb = (h: string): [number, number, number] => {
+  let v = _hRgbCache.get(h);
+  if(!v){v=[parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)];_hRgbCache.set(h,v);}
+  return v;
+};
 const lerpHex = (c1: string, c2: string, t: number): string => {
   const [r1,g1,b1]=hRgb(c1),[r2,g2,b2]=hRgb(c2);
   return `rgb(${(r1+(r2-r1)*t)|0},${(g1+(g2-g1)*t)|0},${(b1+(b2-b1)*t)|0})`;
@@ -456,63 +422,7 @@ function genMaze(mz: number, pass: number, dep: number): Uint8Array {
   return tiles;
 }
 
-function genForest(wt: number, density: number, cluster: number, clearR: number, ringW: number, ringDensity: number): Uint8Array {
-  const tiles=new Uint8Array(wt*wt).fill(1);
-  for(let x=0;x<wt;x++){tiles[x]=0;tiles[(wt-1)*wt+x]=0;}
-  for(let y=0;y<wt;y++){tiles[y*wt]=0;tiles[y*wt+wt-1]=0;}
-  const mid=(wt/2)|0;
-  const GAP=3;
-  const placed:{x:number,y:number,r:number}[]=[];
-  const tooClose=(cx:number,cy:number,r:number):boolean=>{
-    for(const p of placed){const dx=cx-p.x,dy=cy-p.y;if(Math.sqrt(dx*dx+dy*dy)<r+p.r+GAP)return true;}return false;
-  };
-  const placeOrganic=(cx:number,cy:number,r:number):void=>{
-    placed.push({x:cx,y:cy,r});
-    const ri=Math.ceil(r)+1;
-    for(let dy=-ri;dy<=ri;dy++)for(let dx=-ri;dx<=ri;dx++){
-      const dist=Math.sqrt(dx*dx+dy*dy);
-      if(dist<=r*0.65||(dist<=r*1.15&&Math.random()<0.60)){
-        const tx=cx+dx,ty=cy+dy;
-        if(tx>1&&tx<wt-2&&ty>1&&ty<wt-2)tiles[ty*wt+tx]=0;
-      }
-    }
-  };
-  // Global scatter
-  const numAttempts=(wt*wt*density*6)|0;
-  for(let i=0;i<numAttempts;i++){
-    const cx=2+((Math.random()*(wt-4))|0);
-    const cy=2+((Math.random()*(wt-4))|0);
-    if(Math.abs(cx-mid)<clearR&&Math.abs(cy-mid)<clearR)continue;
-    const r=1.4+Math.random()*cluster*0.48;
-    if(tooClose(cx,cy,r))continue;
-    placeOrganic(cx,cy,r);
-  }
-  // Dense ring around spawn
-  const ringAttempts=((Math.PI*(ringW*ringW-clearR*clearR))*ringDensity*6)|0;
-  for(let i=0;i<ringAttempts;i++){
-    const ang=Math.random()*Math.PI*2;
-    const rr=clearR+Math.random()*ringW;
-    const cx=Math.max(2,Math.min(wt-3,(mid+Math.cos(ang)*rr)|0));
-    const cy=Math.max(2,Math.min(wt-3,(mid+Math.sin(ang)*rr)|0));
-    if(Math.abs(cx-mid)<clearR&&Math.abs(cy-mid)<clearR)continue;
-    const r=1.4+Math.random()*cluster*0.48;
-    if(tooClose(cx,cy,r))continue;
-    placeOrganic(cx,cy,r);
-  }
-  // Post-process: widen 1-tile pinch corridors
-  for(let ty=2;ty<wt-2;ty++)for(let tx=2;tx<wt-2;tx++){
-    if(!tiles[ty*wt+tx])continue;
-    const blockedH=!tiles[ty*wt+tx-1]&&!tiles[ty*wt+tx+1];
-    const blockedV=!tiles[(ty-1)*wt+tx]&&!tiles[(ty+1)*wt+tx];
-    if(blockedH&&!blockedV){tiles[ty*wt+tx-1]=1;}
-    else if(blockedV&&!blockedH){tiles[(ty-1)*wt+tx]=1;}
-  }
-  // Re-enforce border
-  for(let x=0;x<wt;x++){tiles[x]=0;tiles[(wt-1)*wt+x]=0;}
-  for(let y=0;y<wt;y++){tiles[y*wt]=0;tiles[y*wt+wt-1]=0;}
-  return tiles;
-}
-
+// Open arena — used for Practice map
 function genVoid(wt: number): Uint8Array {
   const tiles=new Uint8Array(wt*wt).fill(1);
   for(let x=0;x<wt;x++){tiles[x]=0;tiles[(wt-1)*wt+x]=0;}
@@ -601,13 +511,13 @@ export default function SnakeBlast(): JSX.Element {
   const hsBeatenRef  =useRef<boolean>(false);
   const gameStartHSRef=useRef<number>(0);
   const newHSAnimRef  =useRef<{score:number,anim:number}|null>(null);
-  const menuMapRef    =useRef<{tiles:Uint8Array,wt:number,mapType:string,forestTheme?:ForestThemeDef,theme?:ThemeDef,voidTheme?:VoidThemeDef}|null>(null);
+  const menuMapRef    =useRef<{tiles:Uint8Array,wt:number,mapType:string,theme?:ThemeDef}|null>(null);
   const menuMapAnimRef=useRef<number>(0);
   const menuPageRef   =useRef<"main"|"skins"|"maps"|"info">("main");
   const menuDirRef    =useRef<"fwd"|"back"|"none">("none");
   const coinsEarnedRef=useRef<number>(0);
   const mazeJustUnlockedRef=useRef<boolean>(false);
-  const unlocksRef    =useRef<UnlockStore>({skins:["Mono"],mazethemes:["Mono"],maps:["Practice"],forestthemes:[],mapsizes:["Small"],voidthemes:[]});
+  const unlocksRef    =useRef<UnlockStore>({skins:["Mono"],mazethemes:["Mono"],maps:["Practice"],mapsizes:["Small"]});
   const[screen,    setScreen    ]=useState<ScreenState>("menu");
   const [showIntro,    setShowIntro]    =useState<boolean>(false);
   useEffect(()=>{showIntroRef.current=showIntro;},[showIntro]);
@@ -653,13 +563,12 @@ export default function SnakeBlast(): JSX.Element {
       if(s){
         const p=JSON.parse(s) as UnlockStore;
         if(!p.mapsizes)p.mapsizes=["Small"];
-        if(!p.voidthemes)p.voidthemes=[];
         // Migration: always ensure Practice is unlocked
         if(!p.maps.includes("Practice"))p.maps=["Practice",...p.maps];
         return p;
       }
     }catch{}
-    return {skins:["Mono"],mazethemes:["Mono"],maps:["Practice"],forestthemes:[],mapsizes:["Small"],voidthemes:[]};
+    return {skins:["Mono"],mazethemes:["Mono"],maps:["Practice"],mapsizes:["Small"]};
   });
   const[viewSkin,    setViewSkin   ]=useState(()=>settings.skin);
   const[viewSpeed,   setViewSpeed  ]=useState(()=>settings.speed);
@@ -679,14 +588,7 @@ export default function SnakeBlast(): JSX.Element {
     if(menuPage!=="maps"){menuMapRef.current=null;menuMapAnimRef.current=0;return;}
     menuMapAnimRef.current=0;
     let tiles:Uint8Array,wt:number;
-    if(viewMap==="Forest"){
-      const fs=FOREST_SIZE_DEFS[viewMapSize]||FOREST_SIZE_DEFS.Small;
-      const fd=FOREST_DIFF_DEFS[viewMaze]||FOREST_DIFF_DEFS.Normal;
-      tiles=genForest(fs.wt,fd.density,fd.cluster,fd.clearR,fd.ringW,fd.ringDensity);wt=fs.wt;
-    } else if(viewMap==="Void"){
-      const wt2=MAZE_SIZE_DEFS[viewMapSize]?.targetWt||71;
-      tiles=genVoid(wt2); wt=wt2;
-    } else if(viewMap==="Practice"){
+    if(viewMap==="Practice"){
       tiles=genVoid(41); wt=41;
     } else {
       const d=mazeDims(viewMapSize,viewMaze);
@@ -694,9 +596,7 @@ export default function SnakeBlast(): JSX.Element {
     }
     menuMapRef.current={
       tiles,wt,mapType:viewMap,
-      forestTheme:viewMap==="Forest"?(FOREST_THEMES[viewBg]||FOREST_THEMES.Pine):undefined,
       theme:viewMap==="Maze"?(THEMES[viewBg]||THEMES["Mono"]):undefined,
-      voidTheme: viewMap==="Void"?(VOID_THEMES[viewBg]||VOID_THEMES.Nebula):undefined,
     };
   },[menuPage,viewMap,viewMaze,viewMapSize,viewBg]);
 
@@ -707,23 +607,11 @@ export default function SnakeBlast(): JSX.Element {
     const eff:GameSettings={...opts};
     if(!ul.skins.includes(eff.skin))eff.skin="Mono";
     if(!ul.maps.includes(eff.map)){eff.map="Practice";eff.bg="Mono";}
-    else if(eff.map==="Forest"&&!ul.forestthemes.includes(eff.bg))eff.bg="Pine";
     else if(eff.map==="Maze"&&!ul.mazethemes.includes(eff.bg))eff.bg="Mono";
-    else if(eff.map==="Void"&&!((ul.voidthemes||[]).includes(eff.bg)))eff.bg="Nebula";
     if(!(ul.mapsizes||[]).includes(eff.mapSize||"Small"))eff.mapSize="Small";
     if(!MAZE_DIFF_DEFS[eff.maze])eff.maze="Normal";
     let tiles: Uint8Array, wt: number, sx: number, sy: number;
-    if(eff.map==="Forest"){
-      const fs=FOREST_SIZE_DEFS[eff.mapSize||"Small"]||FOREST_SIZE_DEFS.Small;
-      const fd=FOREST_DIFF_DEFS[eff.maze]||FOREST_DIFF_DEFS.Normal;
-      tiles=genForest(fs.wt,fd.density,fd.cluster,fd.clearR,fd.ringW,fd.ringDensity);
-      wt=fs.wt; sx=(wt/2)|0; sy=(wt/2)|0;
-    } else if(eff.map==="Void"){
-      const wt2=MAZE_SIZE_DEFS[eff.mapSize||"Small"]?.targetWt||71;
-      tiles=genVoid(wt2); wt=wt2;
-      sx=(wt/2)|0; sy=(wt/2)|0;
-    } else if(eff.map==="Practice"){
-      // Fixed small open arena — always same size regardless of setting
+    if(eff.map==="Practice"){
       tiles=genVoid(41); wt=41;
       sx=20; sy=20;
     } else {
@@ -731,25 +619,6 @@ export default function SnakeBlast(): JSX.Element {
       tiles=genMaze(d.mz,d.pass,d.dep); wt=d.wt;
       sx=((d.mz/2)|0)*d.cell+WALL+((d.pass/2)|0);
       sy=((d.mz/2)|0)*d.cell+WALL+((d.pass/2)|0);
-    }
-    const vd=VOID_DIFF_DEFS[eff.maze]||VOID_DIFF_DEFS.Normal;
-    const sizeMult=VOID_SIZE_MULT[eff.mapSize||"Small"]??1.0;
-    const shipCount=Math.round(vd.count*sizeMult);
-    const ships:Ship[]=[];
-    if(eff.map==="Void"){
-      for(let i=0;i<shipCount;i++){
-        let spx=(wt/2|0)*T,spy=(wt/2|0)*T;
-        for(let a=0;a<300;a++){
-          const tx=2+((Math.random()*(wt-4))|0);
-          const ty=2+((Math.random()*(wt-4))|0);
-          if(Math.abs(tx-(wt/2|0))>12||Math.abs(ty-(wt/2|0))>12){spx=tx*T+T/2;spy=ty*T+T/2;break;}
-        }
-        const r=vd.minR+Math.random()*(vd.maxR-vd.minR);
-        const spd=vd.speed*(0.55+Math.random()*0.90);
-        const ang=Math.random()*Math.PI*2;
-        const type=r<22?0:r<36?1:r<56?2:3;
-        ships.push({x:spx,y:spy,vx:Math.cos(ang)*spd,vy:Math.sin(ang)*spd,r,type,angle:ang});
-      }
     }
     const W=cvs.current?.width||800,H=cvs.current?.height||600;
     const snake: SnakeSegment[]=[{x:sx,y:sy},{x:sx-1,y:sy},{x:sx-2,y:sy},{x:sx-3,y:sy}];
@@ -759,8 +628,7 @@ export default function SnakeBlast(): JSX.Element {
     const tier=THEME_TIER[eff.bg]??0;
     const sizeIndex={Small:0,Medium:1,Large:2}[eff.mapSize||"Small"]??0;
     const diffFruitMult={Easy:0.8,Normal:1.0,Hard:1.6}[eff.maze]??1.0;
-    const forestMult=eff.map==="Forest"?1.5:1.0;
-    const fruitTarget=Math.round([10+tier*2, 22+tier*3, 26+tier*3][sizeIndex]*diffFruitMult*forestMult);
+    const fruitTarget=Math.round([5+tier, 9+tier*2, 13+tier*2][sizeIndex]*diffFruitMult);
     const powerupTarget=0; // kept for interface compat; actual spawning is timer-based
     const scoreMult=parseFloat(((SPEED_SCORE_MULT[eff.speed]||1)*(SIZE_SCORE_MULT[eff.mapSize||"Small"]||1)).toFixed(2));
     const baseTick=SPEEDS[eff.speed]||140;
@@ -785,11 +653,10 @@ export default function SnakeBlast(): JSX.Element {
       waitInput:true,camX,camY,
       dyingTimer:0,fillAnim:null,bulges:[],pendingFill:null,reconnect:null,
       wt, mapType:eff.map,
-      forestTheme: eff.map==="Forest"?(FOREST_THEMES[eff.bg]||FOREST_THEMES.Pine):undefined,
       powerups:[],baseTickDur:baseTick,fruitTarget,powerupTarget,powerupSpawnTimer:0,tier,scoreMult,
       deathCause:null,
-      ships,
-      voidTheme: eff.map==="Void"?(VOID_THEMES[eff.bg]||VOID_THEMES.Nebula):undefined,
+      snakeSet: new Set(snake.map(s=>`${s.x},${s.y}`)),
+      nonPwFruitCount: fruits.filter(f=>!f.pw).length,
     };
     pops.current=[];fsRef.current=0;
     confettiRef.current=[];particlesRef.current=[];hsBeatenRef.current=false;
@@ -940,8 +807,9 @@ export default function SnakeBlast(): JSX.Element {
     const checkShapes=(g: GameState):void=>{
       if(g.pendingFill)return;
       const hd=g.snake[0];
-      const bset=new Set<string>();
-      for(let i=1;i<g.snake.length;i++)bset.add(`${g.snake[i].x},${g.snake[i].y}`);
+      // Reuse the incrementally-maintained snakeSet (head is included, which is fine —
+      // we check the shape-tile vs head separately below)
+      const bset=g.snakeSet;
       for(let si=g.shapes.length-1;si>=0;si--){
         const sh=g.shapes[si];
         if(sh.tiles.some(t=>t.x===hd.x&&t.y===hd.y))continue;
@@ -951,7 +819,7 @@ export default function SnakeBlast(): JSX.Element {
         const cy=(sh.tiles.reduce((a,t)=>a+t.y,0)/sh.tiles.length)|0;
         const prevByCoord=new Map<string,SnakeSegment>();
         for(let i=0;i<g.snake.length;i++)prevByCoord.set(`${g.snake[i].x},${g.snake[i].y}`,g.prevSnake[i]||g.snake[i]);
-        g.pendingFill={rem,prevByCoord,bonus:sh.bonus,cx,cy,tiles:sh.tiles,timer:500,dur:500,col:sh.col};
+        g.pendingFill={rem,prevByCoord,bonus:sh.bonus,cx,cy,tiles:sh.tiles,timer:750,dur:750,col:sh.col};
         sndFillStart();
         return; // one at a time
       }
@@ -973,17 +841,10 @@ export default function SnakeBlast(): JSX.Element {
         startDying(g);
       };
 
-      // Wall collision
-      if(nh.x<0||nh.x>=g.wt||nh.y<0||nh.y>=g.wt||!g.tiles[nh.y*g.wt+nh.x]){dieAt("wall");return;}
-
-      // Ship collision
-      if(g.ships.length>0){
-        const nhpx=nh.x*T+T/2,nhpy=nh.y*T+T/2;
-        for(const ship of g.ships){
-          const ddx=nhpx-ship.x,ddy=nhpy-ship.y;
-          if(ddx*ddx+ddy*ddy<(ship.r+T*0.38)*(ship.r+T*0.38)){dieAt("ship");return;}
-        }
-      }
+      // Wall collision — phase powerup lets snake pass through wall tiles (not out-of-bounds)
+      const phaseActive=g.powerups.some(p=>p.id==="phase");
+      if(nh.x<0||nh.x>=g.wt||nh.y<0||nh.y>=g.wt){dieAt("wall");return;}
+      if(!g.tiles[nh.y*g.wt+nh.x]&&!phaseActive){dieAt("wall");return;}
 
       // Self-collision — ghost powerup bypasses it entirely
       if(!g.powerups.some(p=>p.id==="ghost")){
@@ -995,9 +856,12 @@ export default function SnakeBlast(): JSX.Element {
 
       // Normal movement
       g.prevSnake=growing?[g.snake[0],...g.snake]:[...g.snake];
+      // Maintain snakeSet incrementally — add new head, remove tail if not growing
+      const tailOld=g.snake[g.snake.length-1];
       g.snake.unshift(nh);
-      if(growing)g.grow--;else g.snake.pop();
-      const sset=new Set(g.snake.map(s=>`${s.x},${s.y}`));
+      g.snakeSet.add(`${nh.x},${nh.y}`);
+      if(growing){g.grow--;}else{g.snake.pop();g.snakeSet.delete(`${tailOld.x},${tailOld.y}`);}
+      const sset=g.snakeSet;
       for(let i=0;i<g.fruits.length;i++){
         const f=g.fruits[i];
         if(f.x!==nh.x||f.y!==nh.y)continue;
@@ -1016,7 +880,7 @@ export default function SnakeBlast(): JSX.Element {
           }
         } else {
           const ft=FRUIT_TYPES[f.t||0];
-          g.grow+=ft.grow;addScore(ft.score,nh.x,nh.y,g);g.bulges.push({t:0});sndEat(f.t||0);
+          g.grow+=ft.grow;g.nonPwFruitCount--;addScore(ft.score,nh.x,nh.y,g);g.bulges.push({t:0});sndEat(f.t||0);
           const PCOLS=["#ffdd44","#00ffaa","#88aaff","#ffdd00"];
           const PSPEEDS=[90,125,165,210];const PCOUNTS=[7,12,16,22];
           spawnParticles(nh.x*T+T/2,nh.y*T+T/2,PCOUNTS[f.t||0],PCOLS[f.t||0],PSPEEDS[f.t||0],3.5+(f.t||0)*1.5);
@@ -1028,12 +892,23 @@ export default function SnakeBlast(): JSX.Element {
       const cx0=(g.camX/T|0)-CULL_MARGIN, cy0=(g.camY/T|0)-CULL_MARGIN;
       const cx1=((g.camX+W)/T|0)+CULL_MARGIN, cy1=((g.camY+H)/T|0)+CULL_MARGIN;
       g.fruits=g.fruits.filter(f=>f.x>=cx0&&f.x<=cx1&&f.y>=cy0&&f.y<=cy1);
+      // Recount non-powerup fruits in one pass after cull
+      let npw=0;for(const f of g.fruits)if(!f.pw)npw++;g.nonPwFruitCount=npw;
       g.shapes=g.shapes.filter(sh=>sh.tiles.some(t=>t.x>=cx0&&t.x<=cx1&&t.y>=cy0&&t.y<=cy1));
-      // Respawn near camera to maintain density wherever the snake is
+      // Respawn near camera — build floor pool once instead of once per fruit
       const excl=new Set(sset);for(const ff of g.fruits)excl.add(`${ff.x},${ff.y}`);
-      while(g.fruits.filter(f=>!f.pw).length<g.fruitTarget){
-        const nf=floorNear(g.tiles,g.camX,g.camY,W,H,excl,g.wt,20);
-        if(!nf)break;g.fruits.push({...nf,t:rndFruitType(g.tier)});excl.add(`${nf.x},${nf.y}`);
+      if(g.nonPwFruitCount<g.fruitTarget){
+        const fm=20,fx0=Math.max(1,(g.camX/T|0)-fm),fy0=Math.max(1,(g.camY/T|0)-fm);
+        const fx1=Math.min(g.wt-2,((g.camX+W)/T|0)+fm),fy1=Math.min(g.wt-2,((g.camY+H)/T|0)+fm);
+        const pool:{x:number,y:number}[]=[];
+        for(let ty2=fy0;ty2<=fy1;ty2++)for(let tx2=fx0;tx2<=fx1;tx2++)
+          if(g.tiles[ty2*g.wt+tx2]&&!excl.has(`${tx2},${ty2}`))pool.push({x:tx2,y:ty2});
+        while(g.nonPwFruitCount<g.fruitTarget&&pool.length>0){
+          const idx=(Math.random()*pool.length)|0;
+          const nf=pool[idx];pool[idx]=pool[pool.length-1];pool.pop();
+          excl.add(`${nf.x},${nf.y}`);
+          g.fruits.push({...nf,t:rndFruitType(g.tier)});g.nonPwFruitCount++;
+        }
       }
       // Powerup spawning is timer-based (handled in main update loop)
       while(g.shapes.length<shapeTargetFor(g.wt)){
@@ -1070,6 +945,7 @@ export default function SnakeBlast(): JSX.Element {
         pts.push({x:pts[0].x-dir.x*T*0.5,y:pts[0].y-dir.y*T*0.5});
       }
       const ghostActive=g.powerups.some(p=>p.id==="ghost");
+      const phaseVis=g.powerups.some(p=>p.id==="phase");
       const lw=T*0.58;
       const N=pts.length;
       // Split into sub-paths wherever shape-fill removed a segment (gap > 1.9 tiles)
@@ -1102,17 +978,18 @@ export default function SnakeBlast(): JSX.Element {
         ctx.lineWidth=lw+14;ctx.strokeStyle="#aaaaff";ctx.globalAlpha=gp*0.5;ctx.stroke();
         ctx.globalAlpha=1;
       }
+      // Phase: pulsing cyan ring — signals wall-pass is active
+      if(phaseVis){
+        const pp=0.20+0.15*Math.sin(ts*0.010);
+        ctx.lineWidth=lw+28;ctx.strokeStyle="#00ffee";ctx.globalAlpha=pp;ctx.stroke();
+        ctx.lineWidth=lw+10;ctx.strokeStyle="#ffffff";ctx.globalAlpha=pp*0.4;ctx.stroke();
+        ctx.globalAlpha=1;
+      }
 
       // Outer glow
-      ctx.lineWidth=lw+18;ctx.strokeStyle=skin.glow;ctx.globalAlpha=ghostActive?0.02:0.03;ctx.stroke();
-      ctx.lineWidth=lw+8;ctx.globalAlpha=ghostActive?0.04:0.07;ctx.stroke();
+      ctx.lineWidth=lw+18;ctx.strokeStyle=skin.glow;ctx.globalAlpha=(ghostActive||phaseVis)?0.02:0.03;ctx.stroke();
+      ctx.lineWidth=lw+8;ctx.globalAlpha=(ghostActive||phaseVis)?0.04:0.07;ctx.stroke();
       ctx.globalAlpha=1;
-
-      // Drop shadow — makes snake look elevated above the floor
-      ctx.shadowColor="rgba(0,0,0,0.6)";ctx.shadowBlur=12;
-      ctx.shadowOffsetX=3;ctx.shadowOffsetY=7;
-      ctx.lineWidth=lw;ctx.strokeStyle="rgba(0,0,0,0.01)";ctx.stroke();
-      ctx.shadowColor="transparent";ctx.shadowBlur=0;ctx.shadowOffsetX=0;ctx.shadowOffsetY=0;
 
       // Dark edge ring — peeks out around the main body, gives roundness/depth
       ctx.lineWidth=lw+4;ctx.strokeStyle="rgba(0,0,0,0.50)";ctx.stroke();
@@ -1138,7 +1015,8 @@ export default function SnakeBlast(): JSX.Element {
         // Precompute RGB for both skin colors once — avoids 4 hex-parses per tab
         const[ar,ag,ab]=hRgb(skin.a),[br,bg2,bb]=hRgb(skin.b);
         const Nm1=Math.max(N-1,1);
-        for(let i=2;i<sp.length-1;i++){
+        // Draw every 2nd tab to halve draw calls — imperceptible at game speed
+        for(let i=2;i<sp.length-1;i+=2){
           const dx=sp[i].x-sp[i-1].x,dy=sp[i].y-sp[i-1].y;
           const len=Math.sqrt(dx*dx+dy*dy);if(len<2)continue;
           const cs=dx/len,sn=dy/len;
@@ -1165,15 +1043,24 @@ export default function SnakeBlast(): JSX.Element {
 
       // ── Pending fill — flash the body segments that are about to be removed ─
       if(g.pendingFill){
-        const{rem,timer,dur}=g.pendingFill;
+        const{rem,timer,dur,col:pfCol2}=g.pendingFill;
         const prog=1-timer/dur;
-        const flash=0.5+0.5*Math.sin(prog*Math.PI*10);
-        ctx.save();ctx.shadowColor="#ff88ff";ctx.shadowBlur=18;
+        const burst=clamp((prog-0.72)/0.28,0,1);
+        const pulse=0.5+0.5*Math.sin(prog*Math.PI*9);
+        const[fr2,fg3,fb2]=hRgb(pfCol2||"#ff88ff");
+        ctx.save();
+        ctx.shadowColor=pfCol2||"#ff88ff";ctx.shadowBlur=16+burst*24;
         snake.forEach((seg,i)=>{
           if(!rem.has(`${seg.x},${seg.y}`))return;
-          ctx.globalAlpha=0.55+flash*0.40;
-          ctx.fillStyle=`rgba(255,120,255,0.90)`;
-          ctx.beginPath();ctx.arc(pts[i].x,pts[i].y,lw*0.52,0,Math.PI*2);ctx.fill();
+          const r=lw*(0.46+pulse*0.18+burst*0.28);
+          ctx.globalAlpha=0.55+pulse*0.35+burst*0.10;
+          // Outer expanding ring
+          ctx.strokeStyle=`rgba(255,255,255,${0.45+burst*0.55})`;
+          ctx.lineWidth=2.5+burst*3;
+          ctx.beginPath();ctx.arc(pts[i].x,pts[i].y,r*1.45,0,Math.PI*2);ctx.stroke();
+          // Inner fill
+          ctx.fillStyle=`rgba(${fr2},${fg3},${fb2},0.90)`;
+          ctx.beginPath();ctx.arc(pts[i].x,pts[i].y,r,0,Math.PI*2);ctx.fill();
         });
         ctx.globalAlpha=1;ctx.shadowBlur=0;ctx.restore();
       }
@@ -1253,18 +1140,12 @@ export default function SnakeBlast(): JSX.Element {
       ctx.fillStyle=lerpHex(skin.head,skin.b,0.44);
       ctx.beginPath();ctx.ellipse(-rx*0.46,0,rx*0.56,Math.min(lw*0.52,ry),0,0,Math.PI*2);ctx.fill();
 
-      // Drop shadow
-      ctx.shadowColor="rgba(0,0,0,0.60)";ctx.shadowBlur=12;ctx.shadowOffsetX=2;ctx.shadowOffsetY=6;
-      ctx.fillStyle="rgba(0,0,0,0.01)";
-      ctx.beginPath();ctx.ellipse(0,0,rx,ry,0,0,Math.PI*2);ctx.fill();
-      ctx.shadowColor="transparent";ctx.shadowBlur=0;ctx.shadowOffsetX=0;ctx.shadowOffsetY=0;
-
       // Dark outline
       ctx.strokeStyle="rgba(0,0,0,0.45)";ctx.lineWidth=3;
       ctx.beginPath();ctx.ellipse(0,0,rx,ry,0,0,Math.PI*2);ctx.stroke();
 
       // Glow + base fill — head stays a single solid ellipse always
-      ctx.shadowColor=skin.glow;ctx.shadowBlur=26;
+      ctx.shadowColor=skin.glow;ctx.shadowBlur=10;
       const hg=ctx.createRadialGradient(-rx*0.22,-ry*0.22,ry*0.06,0,0,rx*1.1);
       hg.addColorStop(0,lerpHex(skin.head,"#ffffff",0.50));
       hg.addColorStop(0.40,skin.head);
@@ -1488,13 +1369,7 @@ export default function SnakeBlast(): JSX.Element {
         const fl=mm.tiles[ty*mm.wt+tx];
         const px=tx*T,py=ty*T;
         if(fl){
-          if(mm.mapType==="Forest"){
-            const ft=mm.forestTheme!;
-            ctx.fillStyle=ft.floor;ctx.fillRect(px,py,T,T);
-            ctx.fillStyle="rgba(0,0,0,0.28)";ctx.fillRect(px,py,T,e);ctx.fillRect(px,py,e,T);
-            ctx.fillStyle="rgba(255,255,255,0.04)";ctx.fillRect(px,py+T-e,T,e);ctx.fillRect(px+T-e,py,e,T);
-            ctx.strokeStyle=ft.grid;ctx.lineWidth=0.8;ctx.strokeRect(px+.5,py+.5,T-1,T-1);
-          } else if(mm.mapType==="Void"||mm.mapType==="Practice"){
+          if(mm.mapType==="Practice"){
             // floor tiles: just show bg (no rendering needed — bg already fills)
           } else {
             const th=mm.theme!;
@@ -1504,22 +1379,7 @@ export default function SnakeBlast(): JSX.Element {
             ctx.strokeStyle=th.grid;ctx.lineWidth=0.8;ctx.strokeRect(px+.5,py+.5,T-1,T-1);
           }
         } else {
-          if(mm.mapType==="Forest"){
-            const ft=mm.forestTheme!;
-            ctx.fillStyle=ft.treeGround;ctx.fillRect(px,py,T,T);
-            ctx.fillStyle=ft.trunk;ctx.fillRect(px+(T*0.38)|0,py+(T*0.62)|0,(T*0.24)|0,(T*0.38)|0);
-            ctx.shadowColor="rgba(0,0,0,0.55)";ctx.shadowBlur=10;ctx.shadowOffsetY=5;
-            ctx.fillStyle=ft.canopy1;ctx.beginPath();ctx.arc(px+T*0.5,py+T*0.38,T*0.43,0,Math.PI*2);ctx.fill();
-            ctx.shadowColor="transparent";ctx.shadowBlur=0;ctx.shadowOffsetY=0;
-            ctx.fillStyle=ft.canopy2;ctx.globalAlpha=0.80;ctx.beginPath();ctx.arc(px+T*0.5,py+T*0.34,T*0.33,0,Math.PI*2);ctx.fill();ctx.globalAlpha=1;
-            ctx.fillStyle=ft.canopy3;ctx.globalAlpha=0.55;ctx.beginPath();ctx.arc(px+T*0.38,py+T*0.24,T*0.16,0,Math.PI*2);ctx.fill();ctx.globalAlpha=1;
-          } else if(mm.mapType==="Void"){
-            const vt=mm.voidTheme as VoidThemeDef;
-            ctx.fillStyle=vt?.bg||"#06001a";ctx.fillRect(px,py,T,T);
-            ctx.strokeStyle=vt?.barrierCol||"#aa00ff";ctx.lineWidth=1.2;
-            ctx.shadowColor=vt?.barrierCol||"#aa00ff";ctx.shadowBlur=8;
-            ctx.strokeRect(px+1,py+1,T-2,T-2);ctx.shadowBlur=0;
-          } else if(mm.mapType==="Practice"){
+          if(mm.mapType==="Practice"){
             ctx.fillStyle="#010c04";ctx.fillRect(px,py,T,T);
             ctx.strokeStyle=PRACTICE_BARRIER_COL;ctx.lineWidth=1.2;
             ctx.shadowColor=PRACTICE_BARRIER_COL;ctx.shadowBlur=8;
@@ -1692,72 +1552,6 @@ export default function SnakeBlast(): JSX.Element {
           if(!g.tiles[ty*g.wt+tx])ctx.rect(tx*T+1,ty*T+1,T-2,T-2);
         }
         ctx.stroke();ctx.shadowBlur=0;
-      } else if(g.mapType==="Void"){
-        ctx.fillStyle=g.voidTheme!.bg;
-        for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++){
-          if(!g.tiles[ty*g.wt+tx])ctx.fillRect(tx*T,ty*T,T,T);
-        }
-        ctx.strokeStyle=g.voidTheme!.barrierCol;ctx.lineWidth=1.5;ctx.shadowColor=g.voidTheme!.barrierCol;ctx.shadowBlur=12;
-        ctx.beginPath();
-        for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++){
-          if(!g.tiles[ty*g.wt+tx])ctx.rect(tx*T+1,ty*T+1,T-2,T-2);
-        }
-        ctx.stroke();ctx.shadowBlur=0;
-      } else if(g.mapType==="Forest"){
-        // Batched multi-pass rendering — one state change per pass instead of ~10 per tile
-        const ft=g.forestTheme!;
-        // Pass 1: floor base
-        ctx.fillStyle=ft.floor;
-        for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++){
-          if(g.tiles[ty*g.wt+tx])ctx.fillRect(tx*T,ty*T,T,T);
-        }
-        // Pass 2: floor top+left shadow
-        ctx.fillStyle="rgba(0,0,0,0.28)";
-        for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++){
-          if(!g.tiles[ty*g.wt+tx])continue;
-          const px=tx*T,py=ty*T;ctx.fillRect(px,py,T,e);ctx.fillRect(px,py,e,T);
-        }
-        // Pass 3: floor bottom+right highlight
-        ctx.fillStyle="rgba(255,255,255,0.04)";
-        for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++){
-          if(!g.tiles[ty*g.wt+tx])continue;
-          const px=tx*T,py=ty*T;ctx.fillRect(px,py+T-e,T,e);ctx.fillRect(px+T-e,py,e,T);
-        }
-        // Pass 4: floor grid (batched path)
-        ctx.beginPath();
-        for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++){
-          if(g.tiles[ty*g.wt+tx])ctx.rect(tx*T+.5,ty*T+.5,T-1,T-1);
-        }
-        ctx.strokeStyle=ft.grid;ctx.lineWidth=0.8;ctx.stroke();
-        // Pass 5: tree ground
-        ctx.fillStyle=ft.treeGround;
-        for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++){
-          if(!g.tiles[ty*g.wt+tx])ctx.fillRect(tx*T,ty*T,T,T);
-        }
-        // Pass 6: trunks
-        ctx.fillStyle=ft.trunk;
-        for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++){
-          if(!g.tiles[ty*g.wt+tx])ctx.fillRect((tx*T+(T*0.38))|0,(ty*T+(T*0.62))|0,(T*0.24)|0,(T*0.38)|0);
-        }
-        // Pass 7: canopy1 — shadow set once, all arcs in one path
-        ctx.shadowColor="rgba(0,0,0,0.55)";ctx.shadowBlur=8;ctx.shadowOffsetY=4;
-        ctx.fillStyle=ft.canopy1;ctx.beginPath();
-        for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++){
-          if(!g.tiles[ty*g.wt+tx]){const px=tx*T,py=ty*T;ctx.moveTo(px+T*0.93,py+T*0.38);ctx.arc(px+T*0.50,py+T*0.38,T*0.43,0,Math.PI*2);}
-        }
-        ctx.fill();ctx.shadowBlur=0;ctx.shadowOffsetY=0;ctx.shadowColor="transparent";
-        // Pass 8: canopy2
-        ctx.fillStyle=ft.canopy2;ctx.globalAlpha=0.80;ctx.beginPath();
-        for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++){
-          if(!g.tiles[ty*g.wt+tx]){const px=tx*T,py=ty*T;ctx.moveTo(px+T*0.83,py+T*0.34);ctx.arc(px+T*0.50,py+T*0.34,T*0.33,0,Math.PI*2);}
-        }
-        ctx.fill();
-        // Pass 9: canopy3
-        ctx.fillStyle=ft.canopy3;ctx.globalAlpha=0.55;ctx.beginPath();
-        for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++){
-          if(!g.tiles[ty*g.wt+tx]){const px=tx*T,py=ty*T;ctx.moveTo(px+T*0.54,py+T*0.24);ctx.arc(px+T*0.38,py+T*0.24,T*0.16,0,Math.PI*2);}
-        }
-        ctx.fill();ctx.globalAlpha=1;
       } else {
         // Maze — batched by draw type: one state change per pass instead of per tile
         const th=g.theme;
@@ -1796,25 +1590,6 @@ export default function SnakeBlast(): JSX.Element {
         }
         ctx.strokeStyle=th.wallStroke;ctx.lineWidth=1.2;ctx.stroke();
       }
-      // Void stars — batched by opacity tier to reduce state changes
-      if(g.mapType==="Void"&&g.voidTheme){
-        const vt=g.voidTheme;
-        ctx.save();ctx.fillStyle=vt.shipGlow;
-        // Draw in 4 opacity tiers to limit state changes (was 140 individual fillStyle changes)
-        for(let tier=0;tier<4;tier++){
-          ctx.globalAlpha=0.12+tier*0.10;
-          ctx.beginPath();
-          for(let i=tier;i<140;i+=4){
-            const stx=((i*6271+i*31)%(g.wt-2)+1)*T+(i*13%T);
-            const sty=((i*5231+i*19)%(g.wt-2)+1)*T+(i*17%T);
-            if(stx<(tx0-1)*T||stx>(tx1+2)*T||sty<(ty0-1)*T||sty>(ty1+2)*T)continue;
-            const sr=0.5+(i%3)*0.5;
-            ctx.moveTo(stx+sr,sty);ctx.arc(stx,sty,sr,0,Math.PI*2);
-          }
-          ctx.fill();
-        }
-        ctx.globalAlpha=1;ctx.restore();
-      }
       // Shapes
       for(const sh of g.shapes){
         if(!sh.tileSet)sh.tileSet=new Set(sh.tiles.map(t=>`${t.x},${t.y}`));
@@ -1829,7 +1604,7 @@ export default function SnakeBlast(): JSX.Element {
         }
         // Batch all edges of this shape into one path → one stroke call
         ctx.save();ctx.strokeStyle=`rgba(${ir},${ig},${ib},0.90)`;
-        ctx.lineWidth=2;ctx.shadowColor=sh.col||"#cc00ff";ctx.shadowBlur=14;
+        ctx.lineWidth=2;ctx.shadowColor=sh.col||"#cc00ff";ctx.shadowBlur=6;
         ctx.beginPath();
         for(const{x,y}of sh.tiles){
           if(x<tx0-1||x>tx1+1||y<ty0-1||y>ty1+1)continue;
@@ -1840,21 +1615,38 @@ export default function SnakeBlast(): JSX.Element {
         ctx.stroke();
         ctx.restore();
       }
-      // Pending fill flash — tiles light up before being removed
+      // Pending fill flash — wave ripple from center, white burst at end
       if(g.pendingFill){
-        const{tiles,timer,dur,col:pfCol}=g.pendingFill;
+        const{tiles,timer,dur,col:pfCol,cx:pcx,cy:pcy}=g.pendingFill;
         const prog=1-timer/dur;
-        const flash=0.5+0.5*Math.sin(prog*Math.PI*10); // rapid flicker
-        const [fr,fg2,fb]=hRgb(pfCol||"#ff88ff");
+        const burst=clamp((prog-0.72)/0.28,0,1); // bright white flash in last 28%
+        const[fr,fg2,fb]=hRgb(pfCol||"#ff88ff");
+        // Precompute max distance from shape center so wave timing is consistent
+        let maxD=0.01;
+        for(const{x,y}of tiles){const d=Math.sqrt((x-pcx)**2+(y-pcy)**2);if(d>maxD)maxD=d;}
         ctx.save();
-        ctx.shadowColor=pfCol||"#ff88ff";ctx.shadowBlur=28;
-        ctx.fillStyle=`rgba(${fr},${fg2},${fb},${0.30+flash*0.55})`;
         for(const{x,y}of tiles){
           if(x<tx0-1||x>tx1+1||y<ty0-1||y>ty1+1)continue;
+          // Wave front: each tile lights up after a short delay based on distance from center
+          const dist=Math.sqrt((x-pcx)**2+(y-pcy)**2);
+          const wave=clamp((prog-(dist/maxD)*0.30)/0.70,0,1);
+          const glow=8+wave*18+burst*22;
+          const baseAlpha=0.22+wave*0.55+burst*0.23;
+          ctx.shadowColor=pfCol||"#ff88ff";ctx.shadowBlur=glow;
+          ctx.fillStyle=`rgba(${fr},${fg2},${fb},${baseAlpha})`;
           ctx.fillRect(x*T,y*T,T,T);
+          // Inner highlight — grows and whitens toward explosion
+          if(wave>0.05){
+            const hw=T*(0.12+wave*0.32+burst*0.15);
+            const margin=(T-hw*2)/2;
+            ctx.fillStyle=`rgba(255,255,255,${wave*0.28+burst*0.52})`;
+            ctx.fillRect(x*T+margin,y*T+margin,hw*2,hw*2);
+          }
         }
-        ctx.strokeStyle=`rgba(${Math.min(255,fr+30)},${Math.min(255,fg2+30)},${Math.min(255,fb+30)},${0.70+flash*0.30})`;
-        ctx.lineWidth=3;
+        // Tile outlines — thicken and brighten with progress
+        ctx.shadowBlur=0;
+        ctx.lineWidth=1.8+prog*3.2;
+        ctx.strokeStyle=`rgba(${Math.min(255,fr+80)},${Math.min(255,fg2+80)},${Math.min(255,fb+80)},${0.55+prog*0.45})`;
         for(const{x,y}of tiles){
           if(x<tx0-1||x>tx1+1||y<ty0-1||y>ty1+1)continue;
           ctx.strokeRect(x*T+1.5,y*T+1.5,T-3,T-3);
@@ -1937,83 +1729,6 @@ export default function SnakeBlast(): JSX.Element {
         }
         ctx.globalAlpha=1;ctx.restore();
       }
-      // ── Spaceships ────────────────────────────────────────────────────────────
-      if(g.ships.length>0&&g.voidTheme){
-        const vt=g.voidTheme;
-        for(const ship of g.ships){
-          const{x:sx2,y:sy2,r,type,angle}=ship;
-          const throb=0.55+0.45*Math.sin(ts*0.008+sx2*0.01);
-          ctx.save();ctx.translate(sx2,sy2);ctx.rotate(angle);
-          // Engine glow
-          ctx.globalAlpha=throb*0.88;
-          ctx.shadowColor=vt.engineCol;ctx.shadowBlur=r*0.9;
-          ctx.fillStyle=vt.engineCol;
-          if(type===0){
-            ctx.beginPath();ctx.ellipse(-r*0.55,0,r*0.42,r*0.20,0,0,Math.PI*2);ctx.fill();
-          } else if(type===1){
-            ctx.beginPath();ctx.ellipse(-r*0.58,-r*0.22,r*0.36,r*0.15,0,0,Math.PI*2);ctx.fill();
-            ctx.beginPath();ctx.ellipse(-r*0.58, r*0.22,r*0.36,r*0.15,0,0,Math.PI*2);ctx.fill();
-          } else if(type===2){
-            ctx.beginPath();ctx.ellipse(-r*0.62,-r*0.28,r*0.38,r*0.16,0,0,Math.PI*2);ctx.fill();
-            ctx.beginPath();ctx.ellipse(-r*0.62, 0,      r*0.38,r*0.16,0,0,Math.PI*2);ctx.fill();
-            ctx.beginPath();ctx.ellipse(-r*0.62, r*0.28,r*0.38,r*0.16,0,0,Math.PI*2);ctx.fill();
-          } else {
-            // Dreadnought — 4 massive engine exhausts in a wide bank
-            for(const oy of [-r*0.42,-r*0.14,r*0.14,r*0.42]){
-              ctx.beginPath();ctx.ellipse(-r*0.65,oy,r*0.46,r*0.18,0,0,Math.PI*2);ctx.fill();
-            }
-          }
-          ctx.globalAlpha=1;
-          // Hull
-          ctx.shadowColor=vt.shipGlow;ctx.shadowBlur=r*0.55;
-          ctx.fillStyle=vt.shipCol;
-          ctx.beginPath();
-          if(type===0){
-            ctx.moveTo(r,0);ctx.lineTo(-r*0.42,-r*0.50);ctx.lineTo(-r*0.18,0);ctx.lineTo(-r*0.42,r*0.50);
-          } else if(type===1){
-            ctx.moveTo(r*0.85,0);ctx.lineTo(r*0.18,-r*0.24);
-            ctx.lineTo(-r*0.50,-r*0.58);ctx.lineTo(-r*0.70,-r*0.58);
-            ctx.lineTo(-r*0.50,-r*0.20);ctx.lineTo(-r*0.50, r*0.20);
-            ctx.lineTo(-r*0.70, r*0.58);ctx.lineTo(-r*0.50, r*0.58);ctx.lineTo(r*0.18, r*0.24);
-          } else if(type===2){
-            ctx.moveTo(r,0);ctx.lineTo(r*0.44,-r*0.55);
-            ctx.lineTo(-r*0.46,-r*0.65);ctx.lineTo(-r*0.80,-r*0.38);
-            ctx.lineTo(-r*0.80, r*0.38);ctx.lineTo(-r*0.46, r*0.65);ctx.lineTo(r*0.44, r*0.55);
-          } else {
-            // Dreadnought: thick slab hull with pronounced front spike and wide swept wings
-            ctx.moveTo(r*1.0,0);
-            ctx.lineTo(r*0.60,-r*0.22);
-            ctx.lineTo(r*0.30,-r*0.55);
-            ctx.lineTo(-r*0.20,-r*0.90);
-            ctx.lineTo(-r*0.55,-r*0.90);
-            ctx.lineTo(-r*0.80,-r*0.52);
-            ctx.lineTo(-r*0.90,-r*0.52);ctx.lineTo(-r*0.90, r*0.52);
-            ctx.lineTo(-r*0.80, r*0.52);
-            ctx.lineTo(-r*0.55, r*0.90);
-            ctx.lineTo(-r*0.20, r*0.90);
-            ctx.lineTo(r*0.30, r*0.55);
-            ctx.lineTo(r*0.60, r*0.22);
-          }
-          ctx.closePath();ctx.fill();
-          // Cockpit highlight
-          ctx.shadowBlur=0;ctx.fillStyle="#ffffff";ctx.globalAlpha=0.26;
-          ctx.beginPath();ctx.ellipse(type<=1?r*0.14:r*0.08,0,r*0.20,r*0.10,0,0,Math.PI*2);ctx.fill();
-          // Secondary cockpit ridge on dreadnought
-          if(type===3){
-            ctx.globalAlpha=0.14;
-            ctx.beginPath();ctx.ellipse(r*0.20,0,r*0.50,r*0.24,0,0,Math.PI*2);ctx.fill();
-          }
-          // Dark outline
-          ctx.globalAlpha=1;ctx.strokeStyle="rgba(0,0,0,0.35)";ctx.lineWidth=type===3?1.5:1;
-          ctx.beginPath();
-          if(type===0){ctx.moveTo(r,0);ctx.lineTo(-r*0.42,-r*0.50);ctx.lineTo(-r*0.18,0);ctx.lineTo(-r*0.42,r*0.50);}
-          else if(type===1){ctx.moveTo(r*0.85,0);ctx.lineTo(r*0.18,-r*0.24);ctx.lineTo(-r*0.50,-r*0.58);ctx.lineTo(-r*0.70,-r*0.58);ctx.lineTo(-r*0.50,-r*0.20);ctx.lineTo(-r*0.50,r*0.20);ctx.lineTo(-r*0.70,r*0.58);ctx.lineTo(-r*0.50,r*0.58);ctx.lineTo(r*0.18,r*0.24);}
-          else if(type===2){ctx.moveTo(r,0);ctx.lineTo(r*0.44,-r*0.55);ctx.lineTo(-r*0.46,-r*0.65);ctx.lineTo(-r*0.80,-r*0.38);ctx.lineTo(-r*0.80,r*0.38);ctx.lineTo(-r*0.46,r*0.65);ctx.lineTo(r*0.44,r*0.55);}
-          else{ctx.moveTo(r*1.0,0);ctx.lineTo(r*0.60,-r*0.22);ctx.lineTo(r*0.30,-r*0.55);ctx.lineTo(-r*0.20,-r*0.90);ctx.lineTo(-r*0.55,-r*0.90);ctx.lineTo(-r*0.80,-r*0.52);ctx.lineTo(-r*0.90,-r*0.52);ctx.lineTo(-r*0.90,r*0.52);ctx.lineTo(-r*0.80,r*0.52);ctx.lineTo(-r*0.55,r*0.90);ctx.lineTo(-r*0.20,r*0.90);ctx.lineTo(r*0.30,r*0.55);ctx.lineTo(r*0.60,r*0.22);}
-          ctx.closePath();ctx.stroke();
-          ctx.restore();
-        }
-      }
       // ── Powerup arrow: faint arrow near head pointing to nearest powerup fruit ─
       const pwFruits=g.fruits.filter(f=>!!f.pw);
       if(pwFruits.length>0&&g.snake.length>0){
@@ -2066,14 +1781,10 @@ export default function SnakeBlast(): JSX.Element {
       let bgColor:string;
       if(scr==="menu"){
         const m=stRef.current.map,b=stRef.current.bg;
-        if(m==="Forest")bgColor=(FOREST_THEMES[b]||FOREST_THEMES.Pine).bg;
-        else if(m==="Void")bgColor=(VOID_THEMES[b]||VOID_THEMES.Nebula).bg;
-        else if(m==="Practice")bgColor="#010c04";
+        if(m==="Practice")bgColor="#010c04";
         else bgColor=(THEMES[b]||THEMES["Mono"]).bg;
       } else if(g){
-        if(g.mapType==="Forest")bgColor=g.forestTheme?.bg||"#030d02";
-        else if(g.mapType==="Void")bgColor=g.voidTheme?.bg||"#06001a";
-        else if(g.mapType==="Practice")bgColor="#010c04";
+        if(g.mapType==="Practice")bgColor="#010c04";
         else bgColor=g.theme.bg;
       } else {
         bgColor="#050810";
@@ -2128,14 +1839,21 @@ export default function SnakeBlast(): JSX.Element {
               g.reconnect={timer:500,dur:500,gapIdx,M,paths};
             }
             g.shapes=g.shapes.filter(sh=>!sh.tiles.every(t=>rem.has(`${t.x},${t.y}`)));
+            // Rebuild snakeSet after bulk segment removal
+            g.snakeSet=new Set(g.snake.map(s=>`${s.x},${s.y}`));
             addScore(bonus,cx,cy,g);
             sndBlast();
-            for(let b=0;b<8;b++)pops.current.push({wx:cx*T+T/2+(Math.random()-.5)*T*4,wy:cy*T+(Math.random()-.5)*T*3,text:"++",col:"#cc00ff",life:1.3});
-            spawnParticles(cx*T+T/2,cy*T+T/2,44,"#cc44ff",260,6);
-            spawnParticles(cx*T+T/2,cy*T+T/2,22,"#ffffff",200,4);
-            spawnParticles(cx*T+T/2,cy*T+T/2,16,"#ffaaff",320,8);
-            const sset=new Set(g.snake.map(s=>`${s.x},${s.y}`));
-            const ns=shapeNear(g.tiles,g.camX,g.camY,W,H,g.shapes,sset,g.wt);
+            const blastCol=g.pendingFill?.col||"#cc44ff";
+            for(let b=0;b<10;b++)pops.current.push({wx:cx*T+T/2+(Math.random()-.5)*T*5,wy:cy*T+(Math.random()-.5)*T*4,text:"++",col:blastCol,life:1.5});
+            // Central burst
+            spawnParticles(cx*T+T/2,cy*T+T/2,55,blastCol,290,7);
+            spawnParticles(cx*T+T/2,cy*T+T/2,28,"#ffffff",220,4);
+            spawnParticles(cx*T+T/2,cy*T+T/2,20,"#ffaaff",340,9);
+            // Per-tile micro-burst so tiles appear to explode individually
+            for(const{x,y}of (g.pendingFill?.tiles||[])){
+              spawnParticles(x*T+T/2,y*T+T/2,5,blastCol,180,3);
+            }
+            const ns=shapeNear(g.tiles,g.camX,g.camY,W,H,g.shapes,g.snakeSet,g.wt);
             if(ns)g.shapes.push(ns);
             g.pendingFill=null;
           }
@@ -2166,10 +1884,12 @@ export default function SnakeBlast(): JSX.Element {
         g.tickDur=g.powerups.some(p=>p.id==="rush")?g.baseTickDur*0.80
           :g.powerups.some(p=>p.id==="chill")?g.baseTickDur*1.20
           :g.baseTickDur;
-        // Probabilistic powerup spawn: 10 s timer, chance based on tier
-        if(g.fruits.every(f=>!f.pw)){
+        // Probabilistic powerup spawn: tier-based interval + chance — better themes spawn more often
+        // fruits.length === nonPwFruitCount means no powerup fruits exist
+        const spawnInterval=POWERUP_SPAWN_INTERVAL[Math.min(g.tier,4)];
+        if(g.fruits.length===g.nonPwFruitCount){
           g.powerupSpawnTimer+=dt;
-          if(g.powerupSpawnTimer>=10000){
+          if(g.powerupSpawnTimer>=spawnInterval){
             g.powerupSpawnTimer=0;
             const chance=POWERUP_SPAWN_CHANCE[Math.min(g.tier,4)];
             if(Math.random()<chance){
@@ -2181,84 +1901,6 @@ export default function SnakeBlast(): JSX.Element {
           }
         } else {
           g.powerupSpawnTimer=0; // reset while one exists
-        }
-        // Ship movement (Void map) — bounce off walls, destroy on body contact
-        if(g.ships.length>0){
-          const bodyTiles=new Set<string>();
-          for(let bi=1;bi<g.snake.length;bi++)bodyTiles.add(`${g.snake[bi].x},${g.snake[bi].y}`);
-          const shipHitsBody=(sx2:number,sy2:number,r2:number):boolean=>{
-            const bx0=Math.max(0,Math.floor((sx2-r2)/T));
-            const bx1=Math.min(g.wt-1,Math.floor((sx2+r2)/T));
-            const by0=Math.max(0,Math.floor((sy2-r2)/T));
-            const by1=Math.min(g.wt-1,Math.floor((sy2+r2)/T));
-            for(let ty2=by0;ty2<=by1;ty2++)for(let tx2=bx0;tx2<=bx1;tx2++){
-              if(bodyTiles.has(`${tx2},${ty2}`))return true;
-            }
-            return false;
-          };
-          // Helper: spawn a replacement ship far from the snake head
-          const vdR=VOID_DIFF_DEFS[stRef.current.maze]||VOID_DIFF_DEFS.Normal;
-          const spawnReplacement=():Ship=>{
-            const hx=(g.snake[0]?.x??0)*T+T/2,hy=(g.snake[0]?.y??0)*T+T/2;
-            let spx=hx,spy=hy;
-            for(let a=0;a<400;a++){
-              const tx=2+((Math.random()*(g.wt-4))|0);
-              const ty=2+((Math.random()*(g.wt-4))|0);
-              const ddx=tx*T+T/2-hx,ddy=ty*T+T/2-hy;
-              if(ddx*ddx+ddy*ddy>(T*16)*(T*16)){spx=tx*T+T/2;spy=ty*T+T/2;break;}
-            }
-            const rr=vdR.minR+Math.random()*(vdR.maxR-vdR.minR);
-            const spd2=vdR.speed*(0.55+Math.random()*0.90);
-            const ang=Math.random()*Math.PI*2;
-            const type=rr<22?0:rr<36?1:rr<56?2:3;
-            return{x:spx,y:spy,vx:Math.cos(ang)*spd2,vy:Math.sin(ang)*spd2,r:rr,type,angle:ang};
-          };
-          const destroyed:Ship[]=[];
-          for(const ship of g.ships){
-            const nx2=ship.x+ship.vx*dt/1000;
-            const wHitX=nx2-ship.r<T||nx2+ship.r>(g.wt-1)*T;
-            if(wHitX){ship.vx*=-1;}
-            else if(shipHitsBody(nx2,ship.y,ship.r)){destroyed.push(ship);continue;}
-            else{ship.x=nx2;}
-            const ny2=ship.y+ship.vy*dt/1000;
-            const wHitY=ny2-ship.r<T||ny2+ship.r>(g.wt-1)*T;
-            if(wHitY){ship.vy*=-1;}
-            else if(shipHitsBody(ship.x,ny2,ship.r)){destroyed.push(ship);continue;}
-            else{ship.y=ny2;}
-            ship.angle=Math.atan2(ship.vy,ship.vx);
-          }
-          if(destroyed.length>0){
-            g.ships=g.ships.filter(s=>!destroyed.includes(s));
-            for(const ship of destroyed){
-              // Explosion burst — bigger ship = more particles
-              const pCols=[["#ffaa00","#ff5500"],["#ff8800","#ffff44"],["#ff4400","#ffcc00"],["#ff2200","#ffffff"]];
-              const pcArr=pCols[ship.type]||pCols[0];
-              spawnParticles(ship.x,ship.y,10+ship.type*10,pcArr[0],150+ship.r*3,3+ship.type*1.2);
-              spawnParticles(ship.x,ship.y,6+ship.type*4,pcArr[1],220+ship.r*2,2);
-              spawnParticles(ship.x,ship.y,4,"#ffffff",300,1.5);
-              // Drop fruit at nearest open tile — bigger ship = rarer fruit
-              const fx=Math.max(1,Math.min(g.wt-2,(ship.x/T)|0));
-              const fy=Math.max(1,Math.min(g.wt-2,(ship.y/T)|0));
-              const fexcl=new Set(g.fruits.map(f=>`${f.x},${f.y}`));
-              g.snake.forEach(s2=>fexcl.add(`${s2.x},${s2.y}`));
-              outer: for(let dr=0;dr<=4;dr++){
-                for(let dy2=-dr;dy2<=dr;dy2++)for(let dx2=-dr;dx2<=dr;dx2++){
-                  if(Math.abs(dx2)!==dr&&Math.abs(dy2)!==dr)continue;
-                  const tx2=fx+dx2,ty2=fy+dy2;
-                  if(tx2<1||ty2<1||tx2>=g.wt-1||ty2>=g.wt-1)continue;
-                  if(!g.tiles[ty2*g.wt+tx2]||fexcl.has(`${tx2},${ty2}`))continue;
-                  if(ship.type===3&&Math.random()<0.20){
-                    g.fruits.push({x:tx2,y:ty2,t:0,pw:rndPowerup(g.tier)});
-                  } else {
-                    g.fruits.push({x:tx2,y:ty2,t:Math.min(3,ship.type)});
-                  }
-                  break outer;
-                }
-              }
-              // Spawn a fresh replacement far from the snake
-              g.ships.push(spawnReplacement());
-            }
-          }
         }
         if(!g.waitInput&&!g.fillAnim&&!g.pendingFill&&!g.reconnect){
           g.moveT+=dt;
@@ -2327,21 +1969,15 @@ export default function SnakeBlast(): JSX.Element {
       // ── World ─────────────────────────────────────────────────────────────
       renderWorld(g,alpha,ts);
 
-      // ── Combo screen edge glow (slow, subtle — scales with combo) ────────
+      // ── Combo screen edge glow (4 cheap edge rects, no gradient) ────────
       if((scr==="playing"||scr==="paused")&&g.combo>=4){
         const ci=Math.min((g.combo-3)/18,1);
-        const pulse=0.5+0.5*Math.sin(ts*0.0028); // very slow breathe
-        const ceg=ctx.createRadialGradient(W/2,H/2,Math.min(W,H)*0.30,W/2,H/2,Math.sqrt(W*W+H*H)*0.62);
-        ceg.addColorStop(0,'rgba(0,0,0,0)');
-        ceg.addColorStop(0.70,'rgba(0,0,0,0)');
-        ceg.addColorStop(1,`rgba(255,0,180,${ci*pulse*0.22})`);
-        ctx.fillStyle=ceg;ctx.fillRect(0,0,W,H);
-        // High combo: slightly brighter glow, still slow
-        if(g.combo>=10){
-          const hi=Math.min((g.combo-9)/16,1);
-          const hpulse=0.5+0.5*Math.sin(ts*0.0022+1.0);
-          ctx.fillStyle=`rgba(255,60,200,${hi*hpulse*0.08})`;ctx.fillRect(0,0,W,H);
-        }
+        const pulse=0.5+0.5*Math.sin(ts*0.0028);
+        const a=(ci*pulse*0.18).toFixed(3);
+        const ew=Math.round(W*0.09),eh=Math.round(H*0.09);
+        ctx.fillStyle=`rgba(255,0,180,${a})`;
+        ctx.fillRect(0,0,W,eh);ctx.fillRect(0,H-eh,W,eh);
+        ctx.fillRect(0,eh,ew,H-eh*2);ctx.fillRect(W-ew,eh,ew,H-eh*2);
       }
 
       // ── Popups (screen-space, only during active play) ────────────────────
@@ -2429,22 +2065,18 @@ export default function SnakeBlast(): JSX.Element {
   const hexRgb=(h: string): string=>{const s=h.replace("#","");const n=parseInt(s,16);return`${(n>>16)&255},${(n>>8)&255},${n&255}`;};
 
   // ── Shop helpers ───────────────────────────────────────────────────────────
-  type ShopCat = "skin"|"mazetheme"|"map"|"foresttheme"|"mapsize"|"voidtheme";
+  type ShopCat = "skin"|"mazetheme"|"map"|"mapsize";
   const isUnlocked=(cat: ShopCat,id: string):boolean=>{
     if(cat==="skin")return unlocks.skins.includes(id);
     if(cat==="mazetheme")return unlocks.mazethemes.includes(id);
     if(cat==="map")return unlocks.maps.includes(id);
-    if(cat==="mapsize")return (unlocks.mapsizes||[]).includes(id);
-    if(cat==="voidtheme")return (unlocks.voidthemes||[]).includes(id);
-    return unlocks.forestthemes.includes(id);
+    return (unlocks.mapsizes||[]).includes(id);
   };
   const itemPrice=(cat: ShopCat,id: string):number=>{
     if(cat==="skin")return SKIN_PRICES[id]??9999;
     if(cat==="mazetheme")return MAZETHEME_PRICES[id]??9999;
     if(cat==="map")return MAP_PRICES[id]??9999;
-    if(cat==="mapsize")return MAPSIZE_PRICES[id]??9999;
-    if(cat==="voidtheme")return VOIDTHEME_PRICES[id]??9999;
-    return FORESTTHEME_PRICES[id]??9999;
+    return MAPSIZE_PRICES[id]??9999;
   };
   const buyItem=(cat: ShopCat,id: string):void=>{
     const price=itemPrice(cat,id);
@@ -2457,20 +2089,8 @@ export default function SnakeBlast(): JSX.Element {
       const u={...prev};
       if(cat==="skin")u.skins=[...prev.skins,id];
       else if(cat==="mazetheme")u.mazethemes=[...prev.mazethemes,id];
-      else if(cat==="map"){
-        if(id==="Forest"){
-          u.maps=[...prev.maps,id];
-          if(!prev.forestthemes.includes("Pine"))
-            u.forestthemes=[...prev.forestthemes,"Pine"];
-        } else if(id==="Void"){
-          u.maps=[...prev.maps,id];
-          if(!(prev.voidthemes||[]).includes("Nebula"))u.voidthemes=[...(prev.voidthemes||[]),"Nebula"];
-        } else {
-          u.maps=[...prev.maps,id];
-        }
-      } else if(cat==="mapsize")u.mapsizes=[...(prev.mapsizes||[]),id];
-      else if(cat==="voidtheme")u.voidthemes=[...(prev.voidthemes||[]),id];
-      else u.forestthemes=[...prev.forestthemes,id];
+      else if(cat==="map")u.maps=[...prev.maps,id];
+      else if(cat==="mapsize")u.mapsizes=[...(prev.mapsizes||[]),id];
       return u;
     });
   };
@@ -2611,25 +2231,17 @@ export default function SnakeBlast(): JSX.Element {
     (b,[hk,v])=>(!b||v>b.val)?{label:hk.replace("_"," · "),val:v}:b,null);
   const viewSkinDef=SKINS[viewSkin]||SKINS.Mono;
   const viewTheme=THEMES[viewBg]||THEMES["Mono"];
-  const viewForestTheme=FOREST_THEMES[viewBg]||FOREST_THEMES.Pine;
   const viewHighScore=viewMap==="Practice"?(highScores["Practice_Small_Normal"]||0):(highScores[`${viewMap}_${viewMapSize}_${viewMaze}`]||0);
   const viewDiffAccent=viewMaze==="Easy"?"#44ff88":viewMaze==="Hard"?"#ff4422":"#ffdd00";
   const viewSizeAccent=viewMapSize==="Small"?"#44ff88":viewMapSize==="Large"?"#ff4422":"#ffdd00";
-  const isViewForest=viewMap==="Forest";
-  const isViewVoid=viewMap==="Void";
-  const vt=VOID_THEMES[viewBg];
 
   useEffect(()=>{
-    if(viewMap==="Forest"&&!FOREST_THEMES[viewBg])setViewBg("Pine");
-    else if(viewMap==="Maze"&&!THEMES[viewBg])setViewBg("Neon");
-    else if(viewMap==="Void"&&!VOID_THEMES[viewBg])setViewBg("Nebula");
+    if(viewMap==="Maze"&&!THEMES[viewBg])setViewBg("Mono");
     // Practice has no theme selector — nothing to reset
   // eslint-disable-next-line react-hooks/exhaustive-deps
   },[viewMap]);
   useEffect(()=>{
-    if(settings.map==="Forest"&&!FOREST_THEMES[settings.bg])setSettings(s=>({...s,bg:"Pine"}));
-    else if(settings.map==="Maze"&&!THEMES[settings.bg])setSettings(s=>({...s,bg:"Neon"}));
-    else if(settings.map==="Void"&&!VOID_THEMES[settings.bg])setSettings(s=>({...s,bg:"Nebula"}));
+    if(settings.map==="Maze"&&!THEMES[settings.bg])setSettings(s=>({...s,bg:"Mono"}));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   },[settings.map]);
 
@@ -2773,16 +2385,16 @@ export default function SnakeBlast(): JSX.Element {
             <div style={{fontSize:14,letterSpacing:5,color:viewDiffAccent,opacity:0.75,
               marginBottom:18,pointerEvents:"none"}}>MAPS  &  MODE</div>
             {arRow("MAP",viewMap,
-              ()=>{const opts=["Practice","Maze","Forest","Void"];sndClick();setViewMap(opts[Math.max(0,opts.indexOf(viewMap)-1)]);},
-              ()=>{const opts=["Practice","Maze","Forest","Void"];const i=opts.indexOf(viewMap);sndClick();if(i<opts.length-1)setViewMap(opts[i+1]);},
-              isViewVoid?(vt?.shipCol||"#cc44ff"):isViewForest?"#44bb44":viewMap==="Practice"?"#00ff66":viewTheme.wall)}
+              ()=>{const opts=["Practice","Maze"];sndClick();setViewMap(opts[Math.max(0,opts.indexOf(viewMap)-1)]);},
+              ()=>{const opts=["Practice","Maze"];const i=opts.indexOf(viewMap);sndClick();if(i<opts.length-1)setViewMap(opts[i+1]);},
+              viewMap==="Practice"?"#00ff66":viewTheme.wall)}
             {viewMap==="Maze"&&!isUnlocked("map","Maze")
               ? <div style={{textAlign:"center",marginBottom:10}}>
                   <div style={{fontSize:10,letterSpacing:2,color:"rgba(255,200,50,0.85)",marginBottom:7,fontFamily:"Courier New"}}>LOCKED - REACH  1000  SCORE  IN  PRACTICE</div>
                   <div style={{fontSize:9,color:"rgba(255,200,50,0.50)",fontFamily:"Courier New",letterSpacing:1}}>Play Practice until you score 1000 — then Maze unlocks free!</div>
                 </div>
-              : itemStatusLine("map",viewMap,settings.map,isViewVoid?(vt?.shipCol||"#cc44ff"):isViewForest?"#44bb44":viewMap==="Practice"?"#00ff66":viewTheme.wall,()=>{
-                  const newBg=isViewForest&&!FOREST_THEMES[settings.bg]?"Pine":isViewVoid&&!VOID_THEMES[settings.bg]?"Nebula":!isViewForest&&!isViewVoid&&!THEMES[settings.bg]?"Mono":settings.bg;
+              : itemStatusLine("map",viewMap,settings.map,viewMap==="Practice"?"#00ff66":viewTheme.wall,()=>{
+                  const newBg=viewMap==="Maze"&&!THEMES[settings.bg]?"Mono":settings.bg;
                   setSettings(s=>({...s,map:viewMap,bg:newBg}));
                 })
             }
@@ -2800,35 +2412,18 @@ export default function SnakeBlast(): JSX.Element {
             {viewMap!=="Practice"&&equipLine(viewMaze,settings.maze,viewDiffAccent,()=>setSettings(s=>({...s,maze:viewMaze})))}
             {viewMap==="Practice"
               ? <div style={{textAlign:"center",marginBottom:6,fontSize:9,color:"rgba(0,255,102,0.50)",fontFamily:"Courier New",letterSpacing:2}}>FREE  STARTER  MAP  ·  NO  COINS  EARNED</div>
-              : isViewForest
-              ? arRow("THEME",viewBg,
-                  ()=>{const opts=Object.keys(FOREST_THEMES);sndClick();setViewBg(opts[Math.max(0,opts.indexOf(viewBg)-1)]);},
-                  ()=>{const opts=Object.keys(FOREST_THEMES);const i=opts.indexOf(viewBg);sndClick();if(i<opts.length-1)setViewBg(opts[i+1]);},
-                  "#4dc44d")
-              : isViewVoid
-              ? arRow("THEME",viewBg,
-                  ()=>{const opts=Object.keys(VOID_THEMES);sndClick();setViewBg(opts[Math.max(0,opts.indexOf(viewBg)-1)]);},
-                  ()=>{const opts=Object.keys(VOID_THEMES);const i=opts.indexOf(viewBg);sndClick();if(i<opts.length-1)setViewBg(opts[i+1]);},
-                  vt?.shipCol||"#cc44ff")
               : arRow("THEME",viewBg,
                   ()=>{const opts=Object.keys(THEMES);sndClick();setViewBg(opts[Math.max(0,opts.indexOf(viewBg)-1)]);},
                   ()=>{const opts=Object.keys(THEMES);const i=opts.indexOf(viewBg);sndClick();if(i<opts.length-1)setViewBg(opts[i+1]);},
                   viewTheme.wall)
             }
-            {viewMap!=="Practice"&&isUnlocked("map",viewMap)&&(isViewForest
-              ? itemStatusLine("foresttheme",viewBg,settings.bg,"#4dc44d",()=>setSettings(s=>({...s,bg:viewBg,map:"Forest"})))
-              : isViewVoid
-              ? itemStatusLine("voidtheme",viewBg,settings.bg,vt?.shipCol||"#cc44ff",()=>setSettings(s=>({...s,bg:viewBg,map:"Void"})))
-              : itemStatusLine("mazetheme",viewBg,settings.bg,viewTheme.wall,()=>setSettings(s=>({...s,bg:viewBg,map:"Maze"})))
-            )}
+            {viewMap!=="Practice"&&isUnlocked("map",viewMap)&&
+              itemStatusLine("mazetheme",viewBg,settings.bg,viewTheme.wall,()=>setSettings(s=>({...s,bg:viewBg,map:"Maze"})))
+            }
             {viewMap==="Practice"&&<div style={{width:"min(270px,76vw)",height:8,borderRadius:4,marginBottom:14,
               background:"linear-gradient(to right,#010c04,#00ff66 55%,#00aa44)"}}/>}
-            {isViewVoid&&<div style={{width:"min(270px,76vw)",height:8,borderRadius:4,marginBottom:14,
-              background:`linear-gradient(to right,${vt?.bg||"#06001a"},${vt?.shipGlow||"#8800ff"} 55%,${vt?.shipCol||"#cc44ff"})`}}/>}
-            {!isViewVoid&&viewMap!=="Practice"&&<div style={{width:"min(270px,76vw)",height:8,borderRadius:4,marginBottom:14,overflow:"hidden",
-              background:isViewForest
-                ?`linear-gradient(to right,${viewForestTheme.treeGround},${viewForestTheme.canopy2} 55%,${viewForestTheme.floor})`
-                :`linear-gradient(to right,${viewTheme.bg},${viewTheme.wall} 55%,${viewTheme.floor})`
+            {viewMap!=="Practice"&&<div style={{width:"min(270px,76vw)",height:8,borderRadius:4,marginBottom:14,overflow:"hidden",
+              background:`linear-gradient(to right,${viewTheme.bg},${viewTheme.wall} 55%,${viewTheme.floor})`
             }}/>}
             <div style={{textAlign:"center",marginBottom:14,pointerEvents:"none"}}>
               <div style={{fontSize:12,letterSpacing:3,color:"rgba(255,200,50,0.65)",
@@ -2937,24 +2532,17 @@ export default function SnakeBlast(): JSX.Element {
                       {Row("~~","CHILL  +30","Moves slower for 6 s — easier to turn.","#88ddff")}
                       {Row("++","GHOST  +50","Pass through your own body for 7 s.","#bbbbff")}
                       {Row("x2","DOUBLE  +75","All score ×2 for 8 s.","#ffdd00")}
+                      {Row("[]","PHASE  +60","Pass through walls for 7 s. Tier 3+ only.","#00ffee")}
                       <div style={{fontSize:9,color:"rgba(200,220,255,0.40)",fontFamily:"Courier New",marginTop:3,lineHeight:1.4}}>
-                        One powerup spawns every ~10 s when none are on the map. Better themes = higher chance.
-                      </div>
-                    </>)}
-                    {S("SCORE  MULTIPLIER","#88ccff",<>
-                      {Stat("Fast  speed","× 1.4  score","#ff8844")}
-                      {Stat("Large  map","× 1.5  score","#ff4422")}
-                      {Stat("Medium  map","× 1.2  score","#ffdd44")}
-                      <div style={{fontSize:9,color:"rgba(200,220,255,0.40)",fontFamily:"Courier New",marginTop:3,lineHeight:1.4}}>
-                        Multipliers stack. Fast + Large = ×2.1 score per point.
+                        Better themes spawn powerups more often — tier 4 spawns every ~3.5 s!
                       </div>
                     </>)}
                     {S("THEMES  &  TIERS","#88ccff",<>
-                      {Row("0","Tier 0  —  Mono / Pine","Rush powerup only. Rare chance.","#aaaaaa")}
-                      {Row("1","Tier 1  —  Neon / Swamp","Rush & Chill powerups.","#44ffcc")}
-                      {Row("2","Tier 2  —  Arctic / Autumn","Adds Ghost powerup.","#88ddff")}
-                      {Row("3","Tier 3  —  Magma / Cherry","Adds Double Score.","#ff8844")}
-                      {Row("4","Tier 4  —  Space / Winter","All powerups. Rarest fruits.","#cc88ff")}
+                      {Row("0","Tier 0  —  Mono","Rush only. Spawns every ~14 s.","#aaaaaa")}
+                      {Row("1","Tier 1  —  Neon / Toxic","Rush & Chill. Every ~11 s.","#44ffcc")}
+                      {Row("2","Tier 2  —  Arctic / Crimson","Adds Ghost. Every ~8 s.","#88ddff")}
+                      {Row("3","Tier 3  —  Gold / Magma","Adds Double & Phase. Every ~5.5 s.","#ff8844")}
+                      {Row("4","Tier 4  —  Teal and above","All powerups. Every ~3.5 s.","#cc88ff")}
                     </>)}
                   </div>
                 </div>
